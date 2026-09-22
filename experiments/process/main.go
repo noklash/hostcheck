@@ -8,18 +8,27 @@ import (
 )
 
 func main() {
-	pids, err := process.ListPIDs()
+	stats, err := process.Collect()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Printf("processes=%d\n", len(pids))
+	fmt.Printf("processes=%d\n", len(stats))
 
-	for i, pid := range pids {
+	for i, stat := range stats {
 		if i >= 20 {
 			break
 		}
 
-		fmt.Println(pid)
+		fmt.Printf(
+			"pid=%d comm=%q state=%c ppid=%d threads=%d utime=%d stime=%d\n",
+			stat.PID,
+			stat.Comm,
+			stat.State,
+			stat.PPID,
+			stat.Threads,
+			stat.UTime,
+			stat.STime,
+		)
 	}
 }
