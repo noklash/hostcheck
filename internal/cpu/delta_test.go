@@ -29,7 +29,10 @@ func TestStatDelta(t *testing.T) {
 		GuestNice: 2,
 	}
 
-	got := current.Delta(previous)
+	got, err := current.Delta(previous)
+	if err != nil {
+		t.Fatalf("Delta() error = %v", err)
+	}
 
 	want := Delta{
 		User:      50,
@@ -46,5 +49,32 @@ func TestStatDelta(t *testing.T) {
 
 	if got != want {
 		t.Fatalf("Delta() = %+v, want %+v", got, want)
+	}
+}
+
+func TestStatDeltaRejectsCounterRegression(t *testing.T) {
+	previous := Stat{
+		User:      100,
+		Nice:      20,
+		System:    30,
+		Idle:      400,
+		IOWait:    10,
+		IRQ:       5,
+		SoftIRQ:   8,
+		Steal:     2,
+		Guest:     4,
+		GuestNice: 1,
+	}
+
+	current := previous
+	current.User = previous.User - 1
+
+	got, err := current.Delta(previous)
+	if err == nil {
+		t.Fatal("Delta() error = nil, want counter regression error")
+	}
+
+	if got != (Delta{}) {
+		t.Fatalf("Delta() = %+v, want zero delta", got)
 	}
 }
