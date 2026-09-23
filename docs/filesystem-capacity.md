@@ -1,4 +1,3 @@
-```markdown
 # Filesystem Capacity and Inode Accounting
 
 ## Purpose
@@ -423,4 +422,3 @@ filesystem
 Capacity exhaustion and inode exhaustion are separate failure modes.
 
 The collector preserves the kernel's distinctions and leaves health policy for a later layer.
-```
