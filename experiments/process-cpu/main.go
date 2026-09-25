@@ -3,52 +3,49 @@ package main
 import (
 	"fmt"
 	"log"
-	"os"
-	"time"
 
 	"github.com/noklash/hostcheck/internal/process"
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		log.Fatalf("usage: go run ./experiments/process-cpu <pid>")
-	}
-
-	var pid int64
-
-	if _, err := fmt.Sscanf(os.Args[1], "%d", &pid); err != nil {
-		log.Fatalf("invalid pid %q: %v", os.Args[1], err)
-	}
-
-	firstStats, err := process.ReadStats(pid)
+	processes, err := process.Collect()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	first := process.NewSample(firstStats, time.Now())
+	fmt.Printf("processes=%d\n", len(processes))
 
-	time.Sleep(time.Second)
+	for i, p := range processes {
+		if i >= 20 {
+			break
+		}
 
-	secondStats, err := process.ReadStats(pid)
-	if err != nil {
-		log.Fatal(err)
+		stat := p.Stats
+
+		fmt.Printf(
+			"pid=%d comm=%q state=%c ppid=%d threads=%d utime=%d stime=%d",
+			stat.PID,
+			stat.Comm,
+			stat.State,
+			stat.PPID,
+			stat.Threads,
+			stat.UTime,
+			stat.STime,
+		)
+
+		if p.Kthread {
+			fmt.Printf(" kthread=true memory=unavailable")
+		} else {
+			fmt.Printf(
+				" kthread=false vsize=%d rss=%d anon=%d file=%d shmem=%d",
+				p.Memory.VirtualBytes,
+				p.Memory.ResidentBytes,
+				p.Memory.AnonymousBytes,
+				p.Memory.FileBackedBytes,
+				p.Memory.SharedMemoryBytes,
+			)
+		}
+
+		fmt.Println()
 	}
-
-	second := process.NewSample(secondStats, time.Now())
-
-	delta, err := process.DeltaSamples(first, second)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	utilization, err := process.Utilization(delta)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Printf("pid=%d\n", delta.PID)
-	fmt.Printf("cpu_ticks=%d\n", delta.CPUTimeTicks)
-	fmt.Printf("cpu_seconds=%.3f\n", delta.CPUTimeSeconds)
-	fmt.Printf("elapsed_seconds=%.3f\n", delta.Elapsed.Seconds())
-	fmt.Printf("utilization=%.2f%%\n", utilization*100)
 }
