@@ -8,4 +8,5 @@ type Interface struct {
 	MTU          uint64
 	SpeedMbps    *uint64
 	Duplex       *string
+	Addresses    []Address
 }
