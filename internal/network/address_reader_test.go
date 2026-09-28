@@ -15,38 +15,16 @@ func TestReadAddresses(t *testing.T) {
 		{
 			IP:        net.ParseIP("127.0.0.1"),
 			PrefixLen: 8,
+			Scope:     254,
 		},
 		{
 			IP:        net.ParseIP("::1"),
 			PrefixLen: 128,
+			Scope:     254,
 		},
 	}
 
-	if len(addresses) != len(expected) {
-		t.Fatalf("got %d addresses, want %d", len(addresses), len(expected))
-	}
-
-	for i, want := range expected {
-		got := addresses[i]
-
-		if !got.IP.Equal(want.IP) {
-			t.Errorf(
-				"address %d IP = %s, want %s",
-				i,
-				got.IP,
-				want.IP,
-			)
-		}
-
-		if got.PrefixLen != want.PrefixLen {
-			t.Errorf(
-				"address %d prefix = %d, want %d",
-				i,
-				got.PrefixLen,
-				want.PrefixLen,
-			)
-		}
-	}
+	assertAddresses(t, addresses, expected)
 }
 
 func TestReadAddressesEnp0s3(t *testing.T) {
@@ -59,43 +37,57 @@ func TestReadAddressesEnp0s3(t *testing.T) {
 		{
 			IP:        net.ParseIP("10.0.2.15"),
 			PrefixLen: 24,
+			Scope:     0,
 		},
 		{
 			IP:        net.ParseIP("fd17:625c:f037:2:a00:27ff:fed0:dc4d"),
 			PrefixLen: 64,
+			Scope:     0,
 		},
 		{
 			IP:        net.ParseIP("fe80::a00:27ff:fed0:dc4d"),
 			PrefixLen: 64,
+			Scope:     253,
 		},
 	}
 
-	if len(addresses) != len(expected) {
-		t.Fatalf(
-			"got %d addresses, want %d",
-			len(addresses),
-			len(expected),
-		)
+	assertAddresses(t, addresses, expected)
+}
+
+func assertAddresses(t *testing.T, got, want []Address) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("got %d addresses, want %d", len(got), len(want))
 	}
 
-	for i, want := range expected {
-		got := addresses[i]
+	for i, expected := range want {
+		actual := got[i]
 
-		if !got.IP.Equal(want.IP) {
+		if !actual.IP.Equal(expected.IP) {
 			t.Errorf(
 				"address %d IP = %s, want %s",
 				i,
-				got.IP,
-				want.IP,
+				actual.IP,
+				expected.IP,
 			)
 		}
 
-		if got.PrefixLen != want.PrefixLen {
+		if actual.PrefixLen != expected.PrefixLen {
 			t.Errorf(
 				"address %d prefix = %d, want %d",
 				i,
-				got.PrefixLen,
-				want.PrefixLen,
+				actual.PrefixLen,
+				expected.PrefixLen,
+			)
+		}
+
+		if actual.Scope != expected.Scope {
+			t.Errorf(
+				"address %d scope = %d, want %d",
+				i,
+				actual.Scope,
+				expected.Scope,
 			)
 		}
 	}

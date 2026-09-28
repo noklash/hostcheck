@@ -3,6 +3,8 @@ package network
 import (
 	"fmt"
 	"net"
+
+	"github.com/jsimonetti/rtnetlink"
 )
 
 func ReadAddresses(name string) ([]Address, error) {
@@ -11,43 +13,41 @@ func ReadAddresses(name string) ([]Address, error) {
 		return nil, fmt.Errorf("find interface %s: %w", name, err)
 	}
 
-	addrs, err := iface.Addrs()
+	conn, err := rtnetlink.Dial(nil)
 	if err != nil {
-		return nil, fmt.Errorf("read addresses for %s: %w", name, err)
+		return nil, fmt.Errorf("dial rtnetlink: %w", err)
+	}
+	defer conn.Close()
+
+	messages, err := conn.Address.List()
+	if err != nil {
+		return nil, fmt.Errorf("list addresses: %w", err)
 	}
 
-	addresses := make([]Address, 0, len(addrs))
+	addresses := make([]Address, 0)
 
-	for _, addr := range addrs {
-		ipnet, ok := addr.(*net.IPNet)
-		if !ok {
-			return nil, fmt.Errorf(
-				"unsupported address type for %s: %T",
-				name,
-				addr,
-			)
+	for _, message := range messages {
+		if message.Index != uint32(iface.Index) {
+			continue
 		}
 
-		prefixLen, bits := ipnet.Mask.Size()
-		if prefixLen < 0 {
-			return nil, fmt.Errorf(
-				"invalid address mask for %s: %s",
-				name,
-				addr,
-			)
+		if message.Attributes == nil {
+			continue
 		}
 
-		if bits != 32 && bits != 128 {
-			return nil, fmt.Errorf(
-				"invalid address width for %s: %d",
-				name,
-				bits,
-			)
+		ip := message.Attributes.Address
+		if ip == nil {
+			ip = message.Attributes.Local
+		}
+
+		if ip == nil {
+			continue
 		}
 
 		addresses = append(addresses, Address{
-			IP:        append(net.IP(nil), ipnet.IP...),
-			PrefixLen: prefixLen,
+			IP:        cloneIP(ip),
+			PrefixLen: int(message.PrefixLength),
+			Scope:     message.Scope,
 		})
 	}
 
