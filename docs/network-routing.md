@@ -2,9 +2,11 @@
 
 ## Purpose
 
-Hostcheck needs to understand the host's routing state without reimplementing Linux route selection or parsing human-readable command output.
+Hostcheck needs to observe the host's routing state without reimplementing Linux route selection or parsing human-readable command output.
 
-This document records the Linux routing model observed during development and defines the routing information Hostcheck V1 collects.
+This document records the Linux routing model observed during development and defines the routing information Hostcheck V1 currently collects.
+
+Hostcheck observes routing configuration exposed by the Linux kernel. It does not implement an independent routing algorithm and does not treat the presence of a route as proof of network connectivity.
 
 ## Linux Routing Model
 
@@ -13,18 +15,42 @@ A Linux host can have multiple routes for different destination prefixes and add
 A route can describe:
 
 * destination prefix
+* source prefix
 * next-hop gateway
 * output interface
-* preferred source address
-* metric
+* route priority
 * protocol
 * scope
 * routing table
 * route type
+* route flags
 
-Routing rules determine which routing table is consulted. The selected route is then used by the kernel to determine how traffic should leave the host.
+Linux routing also involves routing rules, multiple routing tables, policy routing, and other mechanisms.
 
-Hostcheck observes this state. It does not implement its own routing algorithm.
+Hostcheck observes the route state exposed by the kernel. It does not attempt to reproduce the complete kernel route-selection process.
+
+Conceptually:
+
+```text
+packet
+   |
+   v
+routing rules
+   |
+   v
+routing table(s)
+   |
+   v
+candidate routes
+   |
+   v
+Linux route selection
+   |
+   v
+selected route
+```
+
+The exact selection process remains the responsibility of the Linux kernel.
 
 ## Lab Host IPv4 State
 
@@ -32,12 +58,24 @@ The lab host currently has:
 
 ```text
 default via 10.0.2.2 dev enp0s3 proto dhcp src 10.0.2.15 metric 100
+
 10.0.2.0/24 dev enp0s3 proto kernel scope link src 10.0.2.15 metric 100
 ```
 
-The default route sends destinations that do not match a more specific route through `10.0.2.2`.
+The default route handles destinations that do not match a more specific applicable route.
 
-The `10.0.2.0/24` route is directly connected through `enp0s3`, so destinations in that network do not require a gateway.
+The `10.0.2.0/24` route represents the directly connected IPv4 network.
+
+The default route uses:
+
+```text
+gateway = 10.0.2.2
+interface = enp0s3
+priority/metric = 100
+protocol = DHCP
+```
+
+The connected route has no gateway because the destination network is directly reachable through `enp0s3`.
 
 ## Lab Host IPv6 State
 
@@ -45,15 +83,27 @@ The lab host currently has:
 
 ```text
 fd17:625c:f037:2::/64 dev enp0s3 proto ra metric 100
+
 fe80::/64 dev enp0s3 proto kernel metric 1024
+
 default via fe80::2 dev enp0s3 proto ra metric 20100
 ```
 
-The IPv6 default gateway is the link-local address `fe80::2`.
+The IPv6 default gateway is the link-local address:
 
-This demonstrates that a gateway should not be modeled with IPv4-specific assumptions.
+```text
+fe80::2
+```
+
+This demonstrates that a gateway cannot be modeled using IPv4-specific assumptions.
+
+A gateway is simply an IP address associated with a route and may belong to either address family.
 
 ## Route Selection Experiments
+
+The experiments used the `ip route get` interface to observe decisions made by the Linux kernel.
+
+These commands are useful for understanding route selection, but Hostcheck does not execute them as part of route collection.
 
 ### Local IPv4 Destination
 
@@ -98,6 +148,8 @@ local 127.0.0.1 dev lo src 127.0.0.1
 ```
 
 The destination is local to the host and uses the loopback interface.
+
+This also demonstrates that the complete kernel route state contains routes that are not necessarily shown by the simplest `ip route` output.
 
 ### IPv6 Loopback Destination
 
@@ -157,6 +209,18 @@ protocol=ra
 
 The kernel selects the IPv6 default route through `fe80::2`.
 
+These experiments demonstrate an important distinction:
+
+```text
+route configuration
+        !=
+kernel route lookup result
+        !=
+actual network connectivity
+```
+
+Hostcheck currently focuses on observing the first of these.
+
 ## Routing Rules
 
 The host currently uses the following IPv4 rules:
@@ -176,7 +240,7 @@ IPv6 currently reports:
 
 Routing rules are a separate layer from routes.
 
-Conceptually:
+A simplified representation is:
 
 ```text
 packet
@@ -188,14 +252,19 @@ routing rules
 routing table
   |
   v
+candidate route
+  |
+  v
 selected route
 ```
 
-Hostcheck V1 does not attempt to model the complete policy-routing rule system.
+Hostcheck V1 does not currently collect or model the complete policy-routing rule system.
+
+The rules were inspected during experimentation to understand the relationship between routing tables and route entries, but they remain outside the current route collector.
 
 ## Interface Indexes
 
-Linux networking identifies interfaces internally using interface indexes.
+Linux networking identifies interfaces internally using numeric interface indexes.
 
 The lab host currently has:
 
@@ -204,56 +273,185 @@ The lab host currently has:
 2 -> enp0s3
 ```
 
-A route may therefore identify an output interface by its numeric index rather than its human-readable name.
+A rtnetlink route message therefore identifies an output interface using its numeric index.
 
-Hostcheck resolves the kernel interface index to the corresponding interface name when building its own model.
+The current Hostcheck route model preserves that kernel value:
+
+```go
+type Route struct {
+    Family          uint8
+    Destination     net.IP
+    PrefixLen       uint8
+    Source          net.IP
+    SourcePrefixLen uint8
+    Gateway         net.IP
+    InterfaceIndex  uint32
+    Priority        uint32
+    Table           uint32
+    Protocol        uint8
+    Scope           uint8
+    Type            uint8
+    Flags           uint32
+}
+```
+
+Hostcheck does **not** currently resolve `InterfaceIndex` into an interface name inside the route model.
+
+This is deliberate for the current stage of development.
+
+The interface index is the value provided directly by the kernel, so preserving it avoids losing the original identifier.
+
+Resolving the index into an interface name remains a separate integration decision.
 
 ## Route Attributes
 
-The routing information exposed by Linux includes several attributes.
+The rtnetlink route message exposes several pieces of information.
 
 ### Address Family
 
 Identifies whether the route belongs to IPv4 or IPv6.
 
+The current collector preserves the kernel family value.
+
+Observed families are:
+
+```text
+IPv4
+IPv6
+```
+
 ### Destination
 
 The destination prefix matched by the route.
 
-Examples:
+Examples include:
 
 ```text
 0.0.0.0/0
+
 10.0.2.0/24
+
 ::/0
+
 fd17:625c:f037:2::/64
 ```
 
+The current model stores the destination IP and prefix length separately.
+
+### Default Routes
+
+A default route is represented by a zero destination prefix.
+
+In the current rtnetlink representation, the destination may be absent while the prefix length is zero:
+
+```text
+Destination = nil
+PrefixLen   = 0
+```
+
+This represents:
+
+```text
+0.0.0.0/0
+```
+
+for IPv4 or:
+
+```text
+::/0
+```
+
+for IPv6.
+
+Hostcheck preserves this representation rather than inventing an explicit destination address.
+
+### Source
+
+Rtnetlink can expose a source prefix associated with a route.
+
+The current model preserves:
+
+```go
+Source          net.IP
+SourcePrefixLen uint8
+```
+
+The current route collector does not attempt to interpret this as the preferred source-address selection algorithm.
+
+Source information is preserved as kernel route state.
+
 ### Gateway
 
-The next-hop address when the route requires one.
+The gateway is the next-hop address when the route requires one.
+
+For example:
+
+```text
+IPv4:
+    10.0.2.2
+
+IPv6:
+    fe80::2
+```
 
 A directly connected route may have no gateway.
 
+The current collector preserves a missing gateway as `nil`.
+
+It does not invent a gateway for routes that do not have one.
+
 ### Output Interface
 
-The interface through which packets leave the host.
+The route identifies the interface through which traffic should leave the host.
 
-### Preferred Source
+Rtnetlink provides the output interface as a numeric kernel interface index.
 
-The source address Linux prefers when traffic uses the route.
+The current model stores:
 
-### Metric
+```go
+InterfaceIndex uint32
+```
 
-A route preference value used when routes are otherwise applicable.
+For the lab host:
 
-Hostcheck records the metric rather than attempting to reproduce the kernel's route-selection algorithm.
+```text
+2 -> enp0s3
+```
+
+The current route collector does not yet convert that index into the interface name.
+
+### Priority
+
+The route can contain a priority value, corresponding to the metric exposed by common Linux networking tools.
+
+The lab host contains examples such as:
+
+```text
+IPv4 default:
+    priority 100
+
+IPv4 connected:
+    priority 100
+
+IPv6 RA network:
+    priority 100
+
+IPv6 link-local:
+    priority 1024
+
+IPv6 default:
+    priority 20100
+```
+
+Hostcheck records the value.
+
+It does not attempt to reproduce the kernel's route-selection algorithm.
 
 ### Protocol
 
-Identifies how the route was installed or originated.
+The route protocol identifies how the route was installed or originated.
 
-Observed examples include:
+Observed values include:
 
 ```text
 kernel
@@ -261,36 +459,113 @@ dhcp
 ra
 ```
 
-### Scope
+The rtnetlink API exposes these as numeric protocol values.
 
-Describes the route's scope.
+Hostcheck currently preserves the numeric kernel representation rather than converting it immediately into presentation strings.
 
-For example, the directly connected IPv4 route is reported with:
+For the lab host:
 
 ```text
-scope link
+16 -> DHCP
+2  -> kernel
+9  -> RA
 ```
 
-Hostcheck should preserve Linux-provided scope information rather than infer it from Go IP classification functions.
+The human-readable names are useful for documentation and inspection, but the numeric value is the underlying kernel state.
+
+### Scope
+
+Routes can contain a Linux scope value.
+
+For example, the directly connected IPv4 route is observed with:
+
+```text
+scope = 253
+```
+
+which corresponds to link scope.
+
+The current model preserves the numeric scope:
+
+```go
+Scope uint8
+```
+
+Hostcheck should preserve Linux-provided route scope rather than infer it from IP classification functions.
+
+Route scope and address scope are related Linux networking concepts, but they are separate pieces of kernel state and should not be conflated.
 
 ### Route Type
 
-Routes may have different types.
+Routes can have different types.
 
-For example:
+Observed examples include:
 
 ```text
 unicast
 local
+broadcast
 ```
 
-The IPv6 loopback lookup demonstrated a `local` route.
+The current model preserves the numeric route type:
+
+```go
+Type uint8
+```
+
+The rtnetlink experiment demonstrated that the kernel exposes local and broadcast routes that are not necessarily visible in ordinary `ip route` output.
+
+For example, the lab host exposes local-table routes such as:
+
+```text
+10.0.2.15/32
+127.0.0.0/8
+127.0.0.1/32
+```
+
+and broadcast routes such as:
+
+```text
+10.0.2.255/32
+127.255.255.255/32
+```
+
+This is an important difference between observing the kernel's route state and parsing a simplified command view.
 
 ### Routing Table
 
 Routes belong to routing tables.
 
-The normal host configuration uses the `local`, `main`, and potentially `default` tables through routing rules.
+The lab host exposes routes in at least:
+
+```text
+254 -> main
+255 -> local
+```
+
+The rtnetlink experiment showed both ordinary main-table routes and local-table routes.
+
+For example:
+
+```text
+table=254
+```
+
+was observed for the normal IPv4 and IPv6 routes.
+
+Local and broadcast routes were observed with:
+
+```text
+table=255
+```
+
+The current `Route` model preserves the routing table as:
+
+```go
+Table uint32
+```
+
+The model therefore retains the kernel table identifier instead of assuming that every route belongs to the main table.
 
 ## Kernel Interfaces
 
@@ -298,7 +573,19 @@ The normal host configuration uses the `local`, `main`, and potentially `default
 
 The `ip` command is useful for human inspection and validation.
 
-Hostcheck does not parse its output.
+For example:
+
+```bash
+ip route
+ip -6 route
+ip -j route
+ip -j -6 route
+ip route get <destination>
+```
+
+These commands were heavily used during development to understand Linux routing behavior.
+
+Hostcheck does not parse their output.
 
 ### `/proc/net/route`
 
@@ -308,19 +595,25 @@ Linux exposes IPv4 routing information through:
 /proc/net/route
 ```
 
-The representation contains hexadecimal destination and gateway values along with route metadata.
+The representation contains hexadecimal destination and gateway values together with route metadata.
 
-This is useful for understanding the kernel's representation but is not the production interface used by Hostcheck.
+A dedicated experiment was used to inspect the raw IPv4 route table.
+
+This was useful for understanding how Linux exposes routing state through `/proc`.
+
+It is not the production route collection interface used by Hostcheck.
+
+The experiment is retained as learning and validation evidence rather than becoming part of the production collector.
 
 ### `/proc/net/ipv6_route`
 
-Linux exposes IPv6 routing information through:
+Linux also exposes IPv6 routing information through:
 
 ```text
 /proc/net/ipv6_route
 ```
 
-Its representation is lower-level and less convenient for application-level collection.
+Its representation is lower-level and less convenient for application-level structured collection.
 
 Hostcheck does not parse this file for production route collection.
 
@@ -340,11 +633,84 @@ rtnetlink
     |
     v
 Linux networking subsystem
+    |
+    v
+kernel route state
 ```
 
-This allows userspace programs to query structured kernel networking state without executing and parsing the `ip` command.
+This allows userspace programs to query structured networking state without executing and parsing the `ip` command.
 
-Hostcheck uses a Go netlink library as its implementation boundary.
+Hostcheck uses the Go `github.com/jsimonetti/rtnetlink` library as the implementation boundary.
+
+The route collector requests the kernel route list and maps the returned rtnetlink messages into the Hostcheck `Route` model.
+
+## Rtnetlink Route Experiment
+
+The rtnetlink experiment was used to inspect the complete route messages exposed by the kernel.
+
+The lab host produced entries including:
+
+```text
+family=IPv4
+dst=<none>/0
+table=254
+protocol=16
+scope=0
+type=1
+gateway=10.0.2.2
+oif=2
+priority=100
+```
+
+and:
+
+```text
+family=IPv4
+dst=10.0.2.0/24
+table=254
+protocol=2
+scope=253
+type=1
+gateway=<none>
+oif=2
+priority=100
+```
+
+IPv6 included:
+
+```text
+family=IPv6
+dst=fd17:625c:f037:2::/64
+table=254
+protocol=9
+scope=0
+type=1
+gateway=<none>
+oif=2
+priority=100
+```
+
+and:
+
+```text
+family=IPv6
+dst=<none>/0
+table=254
+protocol=9
+scope=0
+type=1
+gateway=fe80::2
+oif=2
+priority=20100
+```
+
+The experiment also exposed local and broadcast routes in table 255.
+
+This established that rtnetlink provides a more complete representation of the kernel's route state than the simplified output normally shown by:
+
+```bash
+ip route
+```
 
 ## Why Hostcheck Does Not Parse `ip`
 
@@ -358,40 +724,106 @@ Parsing its text output introduces dependencies on:
 * version-specific presentation
 * text parsing rules
 
-Earlier address experiments demonstrated this problem.
+The address experiments already demonstrated how positional parsing can fail.
 
-A fixed field position in `ip` output was incorrectly assumed to contain address scope, but an IPv4 broadcast address appeared before the scope field.
+For example:
 
-Structured kernel networking interfaces avoid this class of parsing error.
+```text
+... brd 10.0.2.255 scope global ...
+```
+
+contains the broadcast address before the scope value.
+
+Structured kernel interfaces avoid this class of parsing problem.
+
+The same principle applies to routes.
+
+Hostcheck should consume structured kernel networking information directly rather than depend on the presentation format of the `ip` command.
 
 ## Hostcheck V1 Design
 
 Hostcheck V1 collects configured routing state through Linux's native networking interface.
 
-The internal Hostcheck model remains independent of the netlink library's internal route representation.
+The current route model is:
 
-The model preserves information useful for understanding host routing:
+```go
+type Route struct {
+    Family          uint8
+    Destination     net.IP
+    PrefixLen       uint8
+    Source          net.IP
+    SourcePrefixLen uint8
+    Gateway         net.IP
+    InterfaceIndex  uint32
+    Priority        uint32
+    Table           uint32
+    Protocol        uint8
+    Scope           uint8
+    Type            uint8
+    Flags           uint32
+}
+```
+
+The model is intentionally close to the information exposed by rtnetlink.
+
+It preserves:
 
 * address family
-* destination prefix
-* gateway when present
-* output interface
-* preferred source when present
-* metric
+* destination
+* destination prefix length
+* source
+* source prefix length
+* gateway
+* output interface index
+* route priority
+* routing table
 * protocol
-* scope when available
+* scope
 * route type
-* routing table when available
+* route flags
 
 The collector preserves absence as absence.
 
 For example:
 
-* a directly connected route has no gateway
-* a route may have no preferred source
+* a directly connected route can have no gateway
+* a route can have no source attribute
+* a default route can have no destination address in the rtnetlink representation
 * some attributes are not meaningful for every route
 
 Hostcheck must not replace missing information with fabricated values.
+
+## Route Flags
+
+Rtnetlink also exposes route flags.
+
+The current model preserves:
+
+```go
+Flags uint32
+```
+
+rather than translating the value into a reduced set of application-level booleans.
+
+The current lab environment reports zero flags for the observed routes, but the field remains part of the model so that kernel-provided route state is not discarded.
+
+Interpretation of individual flags can be added later if Hostcheck develops a requirement for them.
+
+## Multipath Routes
+
+Rtnetlink can represent multipath routes with multiple next hops.
+
+The underlying library exposes multipath information through route attributes.
+
+The current Hostcheck V1 `Route` model does not represent multiple next hops.
+
+This is an intentional V1 limitation.
+
+The collector currently preserves the primary route attributes needed for the lab's simple routing topology without prematurely introducing a more complex route representation.
+
+If multipath support becomes necessary, it should be added explicitly rather than flattening multiple next hops into a single gateway.
+
+A multipath route should not be misrepresented as an ordinary single-gateway route.
 
 ## Routing and Connectivity Are Different
 
@@ -416,8 +848,11 @@ For example, a host can have:
 
 ```text
 interface = UP
+
 address   = configured
+
 route     = present
+
 gateway   = configured
 ```
 
@@ -427,15 +862,59 @@ Hostcheck therefore treats route collection as observation of configuration and 
 
 Active connectivity testing is a separate capability.
 
+## Route Configuration and Route Selection Are Different
+
+Hostcheck must also distinguish between observing routes and performing a route lookup.
+
+The route collector reports the configured kernel route entries.
+
+It does not ask:
+
+```text
+"Which route would Linux choose for 1.1.1.1?"
+```
+
+and attempt to reproduce that answer itself.
+
+Linux already owns route selection.
+
+The development experiments used:
+
+```bash
+ip route get
+```
+
+to observe the kernel's actual decisions.
+
+This is useful for understanding the system, but it should not be replaced with a duplicate algorithm inside Hostcheck.
+
 ## V1 Scope
 
-Hostcheck V1 collects routing state.
+Hostcheck V1 currently collects:
 
-It does not:
+* IPv4 routes
+* IPv6 routes
+* destination addresses when provided
+* destination prefix lengths
+* source addresses when provided
+* source prefix lengths
+* gateways when provided
+* output interface indexes
+* route priority
+* routing table identifiers
+* route protocol
+* route scope
+* route type
+* route flags
+
+Hostcheck V1 does not currently:
 
 * reimplement Linux route selection
+* collect the complete routing-rule system
 * modify routes
 * modify routing rules
+* resolve route interface indexes into names inside the `Route` model
+* model multipath next hops
 * perform gateway probes
 * perform DNS checks
 * measure latency
@@ -446,6 +925,7 @@ It does not:
 * analyze container networking
 * analyze network namespaces
 * provide a complete policy-routing analyzer
+* determine whether a configured route is actually reachable
 
 ## Lab Environment Limitations
 
@@ -456,8 +936,11 @@ The current experiments were performed on a simple VirtualBox Linux host with:
 * one loopback interface
 * IPv4 networking
 * IPv6 networking
+* simple main and local routing tables
+* DHCP-provided IPv4 configuration
+* router-advertisement-provided IPv6 configuration
 
-More complex systems may contain:
+More complex Linux systems may contain:
 
 * multiple interfaces
 * multiple default routes
@@ -469,8 +952,42 @@ More complex systems may contain:
 * network namespaces
 * containers
 * multiple next hops
+* multipath routes
+* custom routing tables
+* complex routing rules
 
 These are outside the current V1 scope.
+
+The current route model is therefore intentionally smaller than the complete Linux routing subsystem.
+
+## Testing
+
+The route collector has tests covering basic invariants and expected lab state.
+
+The tests verify that:
+
+* route collection succeeds
+* at least one route is returned
+* route families are IPv4 or IPv6
+* destination prefix lengths are valid
+* source prefix lengths are valid
+* destination addresses match the route family
+* gateway addresses match the route family
+* both IPv4 and IPv6 default routes are present
+* the expected `10.0.2.0/24` IPv4 route is present
+
+The default route tests rely on the current rtnetlink representation:
+
+```text
+PrefixLen   = 0
+Destination = nil
+```
+
+for a default route.
+
+The tests are intentionally based partly on the controlled lab environment.
+
+As Hostcheck becomes portable across different Linux hosts, environment-specific expectations may need to be separated from invariant route-model tests.
 
 ## Important Engineering Findings
 
@@ -478,9 +995,19 @@ These are outside the current V1 scope.
 
 Different destinations can select different routes on the same host and interface.
 
+The `ip route get` experiments demonstrated this directly.
+
 ### Finding 2: Direct routes do not require gateways
 
 A destination matching a directly connected route can be reached through the output interface without a gateway.
+
+The lab's:
+
+```text
+10.0.2.0/24
+```
+
+route demonstrates this.
 
 ### Finding 3: IPv6 gateways can be link-local
 
@@ -492,24 +1019,155 @@ fe80::2
 
 as its IPv6 default gateway.
 
-### Finding 4: Address classification is not Linux scope
+A route model must therefore support IPv6 gateways without assuming that gateways are IPv4 addresses.
 
-Go's `net.IP` classification functions do not provide Linux route/address scope.
+### Finding 4: Route state contains more than ordinary `ip route` output
 
-Linux-provided scope should therefore be used where scope semantics matter.
+Rtnetlink exposed local and broadcast routes that were not shown by the normal simplified route listing.
 
-### Finding 5: Route configuration does not prove connectivity
+This demonstrates why the underlying kernel representation matters.
+
+### Finding 5: Address classification is not route scope
+
+Go's `net.IP` classification functions do not provide Linux route or address scope.
+
+Linux-provided scope should therefore be preserved where scope semantics matter.
+
+### Finding 6: Route configuration does not prove connectivity
 
 A route is evidence of configured kernel state, not proof that packets can successfully reach a destination.
 
-### Finding 6: Linux already owns route selection
+### Finding 7: Linux already owns route selection
 
 Hostcheck should observe and report the kernel's routing state rather than implement another routing algorithm.
 
+### Finding 8: `/proc` route files are useful for learning but not the production boundary
+
+The `/proc/net/route` experiment helped expose the raw IPv4 route representation.
+
+The production collector uses rtnetlink because it provides structured kernel networking messages.
+
+### Finding 9: Interface names and kernel indexes are different identifiers
+
+Human-facing tools use names such as:
+
+```text
+enp0s3
+```
+
+while rtnetlink route messages identify the output interface using:
+
+```text
+2
+```
+
+The current Hostcheck model preserves the kernel interface index.
+
+Resolving that index into an interface name remains a separate integration task.
+
+### Finding 10: Missing route attributes are meaningful
+
+A route without a gateway is not necessarily incomplete.
+
+A directly connected route legitimately has no gateway.
+
+Hostcheck therefore preserves absent attributes instead of manufacturing values to make every route look structurally identical.
+
+### Finding 11: Multipath requires explicit modeling
+
+A route can contain multiple next hops.
+
+Flattening such a route into a single gateway would lose information.
+
+Multipath is therefore excluded from the current V1 model until there is a concrete requirement to represent it correctly.
+
+## Current Architecture
+
+The routing subsystem is currently structured as:
+
+```text
+internal/network/
+    route.go
+    route_reader.go
+    route_reader_test.go
+```
+
+The data model is separated from the collection logic.
+
+The collector depends on:
+
+```text
+Go standard library
+    net.IP
+
+Linux rtnetlink
+    route list
+
+Linux interface indexes
+    output interface identity
+```
+
+The collector does not execute:
+
+```bash
+ip route
+```
+
+and does not parse:
+
+```text
+/proc/net/route
+```
+
+for production collection.
+
+The `/proc` route work remains an experiment used to understand Linux behavior.
+
+## Current V1 Boundary
+
+The current networking work establishes a useful boundary:
+
+```text
+Linux kernel networking state
+            |
+            v
+        rtnetlink
+            |
+            v
+     Hostcheck collector
+            |
+            v
+      Hostcheck model
+            |
+            v
+     future presentation
+```
+
+The collector should preserve meaningful kernel state first.
+
+Human-readable representations such as:
+
+```text
+protocol=dhcp
+scope=link
+type=local
+interface=enp0s3
+```
+
+can be produced later by a presentation layer.
+
+The core collector should not discard the underlying values merely because the final output may use human-readable names.
+
 ## Conclusion
 
-The routing experiments established that Linux routing is a kernel-managed system with multiple address families, routing tables, routing rules, route types, metrics, protocols, scopes, gateways, and source-address information.
+The routing experiments established that Linux routing is a kernel-managed system involving multiple address families, routing tables, routing rules, route types, priorities, protocols, scopes, gateways, source information, and output interfaces.
 
-Hostcheck V1 therefore uses structured Linux networking information rather than parsing command output or legacy `/proc` route files.
+Hostcheck V1 therefore uses structured Linux networking information through rtnetlink rather than parsing command output or using legacy `/proc` route files as its production collection mechanism.
 
-The collector reports meaningful kernel state while leaving route selection and packet forwarding to Linux itself.
+The current collector preserves meaningful kernel route state including destination and source prefixes, gateways, output interface indexes, priorities, tables, protocols, scopes, route types, and flags.
+
+The collector does not attempt to reproduce Linux route selection, policy routing, connectivity, or packet forwarding.
+
+Those responsibilities remain with the Linux kernel.
+
+The remaining networking work is integration and deliberate scope expansion rather than replacing the underlying collection mechanism. In particular, route interface-index resolution, multipath representation, and the relationship between the route model and the broader Hostcheck network snapshot still need to be designed before they become part of V1.
