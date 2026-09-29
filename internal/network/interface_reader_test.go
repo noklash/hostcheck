@@ -10,6 +10,10 @@ func TestReadInterfaceLoopback(t *testing.T) {
 		t.Fatalf("ReadInterface(lo) error = %v", err)
 	}
 
+	if iface.Index != 1 {
+		t.Fatalf("Index = %d, want 1", iface.Index)
+	}
+
 	if iface.Name != "lo" {
 		t.Fatalf("Name = %q, want %q", iface.Name, "lo")
 	}
@@ -39,6 +43,10 @@ func TestReadInterfaceEthernet(t *testing.T) {
 	iface, err := ReadInterface("enp0s3")
 	if err != nil {
 		t.Fatalf("ReadInterface(enp0s3) error = %v", err)
+	}
+
+	if iface.Index != 2 {
+		t.Fatalf("Index = %d, want 2", iface.Index)
 	}
 
 	if iface.Name != "enp0s3" {

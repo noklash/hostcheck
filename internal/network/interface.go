@@ -1,6 +1,7 @@
 package network
 
 type Interface struct {
+	Index        uint32
 	Name         string
 	HardwareAddr string
 	OperState    string

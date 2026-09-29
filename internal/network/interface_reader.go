@@ -3,6 +3,7 @@ package network
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -83,6 +84,11 @@ func readOptionalString(name, field string) (*string, error) {
 }
 
 func ReadInterface(name string) (Interface, error) {
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		return Interface{}, fmt.Errorf("lookup interface %q: %w", name, err)
+	}
+
 	hardwareAddr, err := readRequiredString(name, "address")
 	if err != nil {
 		return Interface{}, err
@@ -118,6 +124,7 @@ func ReadInterface(name string) (Interface, error) {
 	}
 
 	return Interface{
+		Index:        uint32(iface.Index),
 		Name:         name,
 		HardwareAddr: hardwareAddr,
 		OperState:    operState,
