@@ -2,6 +2,13 @@ package network
 
 import "net"
 
+type NextHop struct {
+	InterfaceIndex uint32
+	Gateway        net.IP
+	Hops           uint8
+	Flags          uint8
+}
+
 type Route struct {
 	Family          uint8
 	Destination     net.IP
@@ -16,4 +23,5 @@ type Route struct {
 	Scope           uint8
 	Type            uint8
 	Flags           uint32
+	Multipath       []NextHop
 }

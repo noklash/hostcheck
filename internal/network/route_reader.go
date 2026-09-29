@@ -22,26 +22,45 @@ func ReadRoutes() ([]Route, error) {
 	routes := make([]Route, 0, len(messages))
 
 	for _, message := range messages {
-		attributes := message.Attributes
-
-		routes = append(routes, Route{
-			Family:          message.Family,
-			Destination:     cloneIP(attributes.Dst),
-			PrefixLen:       message.DstLength,
-			Source:          cloneIP(attributes.Src),
-			SourcePrefixLen: message.SrcLength,
-			Gateway:         cloneIP(attributes.Gateway),
-			InterfaceIndex:  attributes.OutIface,
-			Priority:        attributes.Priority,
-			Table:           uint32(message.Table),
-			Protocol:        message.Protocol,
-			Scope:           message.Scope,
-			Type:            message.Type,
-			Flags:           message.Flags,
-		})
+		routes = append(routes, routeFromMessage(message))
 	}
 
 	return routes, nil
+}
+
+func routeFromMessage(message rtnetlink.RouteMessage) Route {
+	attributes := message.Attributes
+
+	route := Route{
+		Family:          message.Family,
+		Destination:     cloneIP(attributes.Dst),
+		PrefixLen:       message.DstLength,
+		Source:          cloneIP(attributes.Src),
+		SourcePrefixLen: message.SrcLength,
+		Gateway:         cloneIP(attributes.Gateway),
+		InterfaceIndex:  attributes.OutIface,
+		Priority:        attributes.Priority,
+		Table:           uint32(message.Table),
+		Protocol:        message.Protocol,
+		Scope:           message.Scope,
+		Type:            message.Type,
+		Flags:           message.Flags,
+	}
+
+	if len(attributes.Multipath) > 0 {
+		route.Multipath = make([]NextHop, 0, len(attributes.Multipath))
+
+		for _, nextHop := range attributes.Multipath {
+			route.Multipath = append(route.Multipath, NextHop{
+				InterfaceIndex: nextHop.Hop.IfIndex,
+				Gateway:        cloneIP(nextHop.Gateway),
+				Hops:           nextHop.Hop.Hops,
+				Flags:          nextHop.Hop.Flags,
+			})
+		}
+	}
+
+	return route
 }
 
 func cloneIP(ip net.IP) net.IP {
