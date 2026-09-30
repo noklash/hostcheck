@@ -213,9 +213,13 @@ These experiments demonstrate an important distinction:
 
 ```text
 route configuration
+
         !=
+
 kernel route lookup result
+
         !=
+
 actual network connectivity
 ```
 
@@ -227,7 +231,9 @@ The host currently uses the following IPv4 rules:
 
 ```text
 0:      from all lookup local
+
 32766:  from all lookup main
+
 32767:  from all lookup default
 ```
 
@@ -235,6 +241,7 @@ IPv6 currently reports:
 
 ```text
 0:      from all lookup local
+
 32766:  from all lookup main
 ```
 
@@ -270,6 +277,7 @@ The lab host currently has:
 
 ```text
 1 -> lo
+
 2 -> enp0s3
 ```
 
@@ -292,16 +300,17 @@ type Route struct {
     Scope           uint8
     Type            uint8
     Flags           uint32
+    Multipath       []NextHop
 }
 ```
 
-Hostcheck does **not** currently resolve `InterfaceIndex` into an interface name inside the route model.
+Hostcheck keeps `InterfaceIndex` as the raw kernel identifier in the low-level route model.
 
-This is deliberate for the current stage of development.
+The route collector does not replace the kernel index with an interface name.
 
-The interface index is the value provided directly by the kernel, so preserving it avoids losing the original identifier.
+The higher-level `Network` snapshot collects interface identity separately. This allows consumers of the assembled network observation to correlate a route's `InterfaceIndex` with an `Interface.Index` and therefore obtain the corresponding interface name without changing the underlying route representation.
 
-Resolving the index into an interface name remains a separate integration decision.
+This separation keeps the low-level collector kernel-facing while allowing higher-level integration to provide human-readable context.
 
 ## Route Attributes
 
@@ -317,6 +326,7 @@ Observed families are:
 
 ```text
 IPv4
+
 IPv6
 ```
 
@@ -346,6 +356,7 @@ In the current rtnetlink representation, the destination may be absent while the
 
 ```text
 Destination = nil
+
 PrefixLen   = 0
 ```
 
@@ -388,9 +399,11 @@ For example:
 
 ```text
 IPv4:
+
     10.0.2.2
 
 IPv6:
+
     fe80::2
 ```
 
@@ -418,7 +431,9 @@ For the lab host:
 2 -> enp0s3
 ```
 
-The current route collector does not yet convert that index into the interface name.
+The low-level route collector does not convert that index into the interface name.
+
+The higher-level network snapshot provides the interface collection needed to correlate the index with interface identity.
 
 ### Priority
 
@@ -428,18 +443,23 @@ The lab host contains examples such as:
 
 ```text
 IPv4 default:
+
     priority 100
 
 IPv4 connected:
+
     priority 100
 
 IPv6 RA network:
+
     priority 100
 
 IPv6 link-local:
+
     priority 1024
 
 IPv6 default:
+
     priority 20100
 ```
 
@@ -455,7 +475,9 @@ Observed values include:
 
 ```text
 kernel
+
 dhcp
+
 ra
 ```
 
@@ -467,7 +489,9 @@ For the lab host:
 
 ```text
 16 -> DHCP
+
 2  -> kernel
+
 9  -> RA
 ```
 
@@ -503,7 +527,9 @@ Observed examples include:
 
 ```text
 unicast
+
 local
+
 broadcast
 ```
 
@@ -519,7 +545,9 @@ For example, the lab host exposes local-table routes such as:
 
 ```text
 10.0.2.15/32
+
 127.0.0.0/8
+
 127.0.0.1/32
 ```
 
@@ -527,6 +555,7 @@ and broadcast routes such as:
 
 ```text
 10.0.2.255/32
+
 127.255.255.255/32
 ```
 
@@ -540,6 +569,7 @@ The lab host exposes routes in at least:
 
 ```text
 254 -> main
+
 255 -> local
 ```
 
@@ -577,9 +607,13 @@ For example:
 
 ```bash
 ip route
+
 ip -6 route
+
 ip -j route
+
 ip -j -6 route
+
 ip route get <destination>
 ```
 
@@ -652,13 +686,21 @@ The lab host produced entries including:
 
 ```text
 family=IPv4
+
 dst=<none>/0
+
 table=254
+
 protocol=16
+
 scope=0
+
 type=1
+
 gateway=10.0.2.2
+
 oif=2
+
 priority=100
 ```
 
@@ -666,13 +708,21 @@ and:
 
 ```text
 family=IPv4
+
 dst=10.0.2.0/24
+
 table=254
+
 protocol=2
+
 scope=253
+
 type=1
+
 gateway=<none>
+
 oif=2
+
 priority=100
 ```
 
@@ -680,13 +730,21 @@ IPv6 included:
 
 ```text
 family=IPv6
+
 dst=fd17:625c:f037:2::/64
+
 table=254
+
 protocol=9
+
 scope=0
+
 type=1
+
 gateway=<none>
+
 oif=2
+
 priority=100
 ```
 
@@ -694,13 +752,21 @@ and:
 
 ```text
 family=IPv6
+
 dst=<none>/0
+
 table=254
+
 protocol=9
+
 scope=0
+
 type=1
+
 gateway=fe80::2
+
 oif=2
+
 priority=20100
 ```
 
@@ -761,6 +827,7 @@ type Route struct {
     Scope           uint8
     Type            uint8
     Flags           uint32
+    Multipath       []NextHop
 }
 ```
 
@@ -781,6 +848,7 @@ It preserves:
 * scope
 * route type
 * route flags
+* multipath next hops
 
 The collector preserves absence as absence.
 
@@ -815,15 +883,19 @@ Rtnetlink can represent multipath routes with multiple next hops.
 
 The underlying library exposes multipath information through route attributes.
 
-The current Hostcheck V1 `Route` model does not represent multiple next hops.
+Hostcheck V1 preserves this information structurally through the `Route.Multipath` field:
 
-This is an intentional V1 limitation.
+```go
+Multipath []NextHop
+```
 
-The collector currently preserves the primary route attributes needed for the lab's simple routing topology without prematurely introducing a more complex route representation.
+Each next hop preserves its kernel-provided interface index, gateway, hop value, and flags.
 
-If multipath support becomes necessary, it should be added explicitly rather than flattening multiple next hops into a single gateway.
+A multipath route is therefore not flattened into a single gateway.
 
-A multipath route should not be misrepresented as an ordinary single-gateway route.
+The `Hops` and `Flags` values are preserved as raw kernel-provided values. Hostcheck does not reinterpret `Hops` as a routing weight or attempt to reproduce Linux's multipath selection behavior.
+
+This keeps the collector faithful to the kernel representation while leaving higher-level interpretation for a later layer if it becomes necessary.
 
 ## Routing and Connectivity Are Different
 
@@ -888,6 +960,50 @@ to observe the kernel's actual decisions.
 
 This is useful for understanding the system, but it should not be replaced with a duplicate algorithm inside Hostcheck.
 
+## Network Observation Snapshot
+
+Hostcheck combines interface state, interface addresses, and routing information into a `Network` observation through `ReadNetwork()`.
+
+The collection sequence is:
+
+```text
+enumerate interfaces
+        |
+        v
+read interface state
+        |
+        v
+read interface addresses
+        |
+        v
+read routing state
+        |
+        v
+assemble Network
+```
+
+The resulting `Network` model records:
+
+```go
+type Network struct {
+    ObservedAt time.Time
+    Interfaces []Interface
+    Routes     []Route
+}
+```
+
+`ObservedAt` records when the network observation cycle begins.
+
+The resulting object is a best-effort observation, not an atomic kernel snapshot. The underlying information comes from separate Linux kernel interfaces and can change while collection is in progress.
+
+For example, interface traffic counters can change between individual reads even when interface configuration, addresses, and routes remain unchanged.
+
+Hostcheck therefore does not use locking, retries, or transaction-like mechanisms to create the appearance of atomicity across independent kernel interfaces.
+
+The timestamp provides temporal context for the observation without claiming that every field was read at exactly the same instant.
+
+Route interface indexes remain kernel-facing in the low-level route model. The higher-level network snapshot contains the corresponding interface indexes and names, allowing consumers to correlate a route's output interface with the collected interface identity without changing the underlying route representation.
+
 ## V1 Scope
 
 Hostcheck V1 currently collects:
@@ -906,6 +1022,10 @@ Hostcheck V1 currently collects:
 * route scope
 * route type
 * route flags
+* multipath next hops
+* interface identity and state
+* interface addresses
+* network observation timestamp
 
 Hostcheck V1 does not currently:
 
@@ -913,8 +1033,6 @@ Hostcheck V1 does not currently:
 * collect the complete routing-rule system
 * modify routes
 * modify routing rules
-* resolve route interface indexes into names inside the `Route` model
-* model multipath next hops
 * perform gateway probes
 * perform DNS checks
 * measure latency
@@ -926,6 +1044,10 @@ Hostcheck V1 does not currently:
 * analyze network namespaces
 * provide a complete policy-routing analyzer
 * determine whether a configured route is actually reachable
+* interpret multipath selection behavior
+* treat the network observation as an atomic transaction
+
+Route interface indexes are intentionally preserved as kernel indexes in the `Route` model. Their relationship to interface names is established by the higher-level `Network` snapshot rather than by changing the low-level route representation.
 
 ## Lab Environment Limitations
 
@@ -975,11 +1097,23 @@ The tests verify that:
 * gateway addresses match the route family
 * both IPv4 and IPv6 default routes are present
 * the expected `10.0.2.0/24` IPv4 route is present
+* multipath fields preserve the underlying interface index, gateway, hop value, and flags
+
+The network snapshot tests additionally verify that:
+
+* network collection succeeds
+* an observation timestamp is recorded
+* at least one interface is returned
+* at least one route is returned
+* collected interface indexes are valid
+* collected interface addresses are non-nil
+* route interface indexes can be correlated with collected interface identity
 
 The default route tests rely on the current rtnetlink representation:
 
 ```text
 PrefixLen   = 0
+
 Destination = nil
 ```
 
@@ -1061,9 +1195,9 @@ while rtnetlink route messages identify the output interface using:
 2
 ```
 
-The current Hostcheck model preserves the kernel interface index.
+The low-level Hostcheck route model preserves the kernel interface index.
 
-Resolving that index into an interface name remains a separate integration task.
+The higher-level network snapshot provides the interface collection needed to correlate that index with an interface name.
 
 ### Finding 10: Missing route attributes are meaningful
 
@@ -1079,31 +1213,72 @@ A route can contain multiple next hops.
 
 Flattening such a route into a single gateway would lose information.
 
-Multipath is therefore excluded from the current V1 model until there is a concrete requirement to represent it correctly.
+Hostcheck therefore preserves multipath routes as a collection of `NextHop` values rather than flattening them into the primary gateway.
+
+The collector preserves the raw next-hop fields without attempting to reproduce Linux's multipath selection behavior.
+
+### Finding 12: A network observation is not an atomic kernel snapshot
+
+The network snapshot combines information from multiple kernel interfaces.
+
+Interface configuration, addresses, routes, and runtime counters can change independently during collection.
+
+`Network.ObservedAt` records the beginning of the observation cycle and provides temporal context, but it does not imply that every field was read simultaneously.
+
+This is intentional. Hostcheck reports the state it observed during a collection cycle rather than manufacturing transactional semantics that Linux does not provide across these interfaces.
 
 ## Current Architecture
 
-The routing subsystem is currently structured as:
+The networking subsystem is currently structured as:
 
 ```text
 internal/network/
+
+    address.go
+    address_reader.go
+
+    enumerate.go
+
+    interface.go
+    interface_reader.go
+
+    network.go
+
     route.go
     route_reader.go
-    route_reader_test.go
+
+    statistics.go
+    statistics_reader.go
 ```
 
-The data model is separated from the collection logic.
+The data models are separated from the collection logic.
 
-The collector depends on:
+The higher-level network collector assembles:
+
+```text
+interface identity/state
+        +
+interface addresses
+        +
+routing state
+        |
+        v
+     Network
+```
+
+The routing collector depends on:
 
 ```text
 Go standard library
+
     net.IP
 
 Linux rtnetlink
+
     route list
 
 Linux interface indexes
+
     output interface identity
 ```
 
@@ -1129,17 +1304,35 @@ The current networking work establishes a useful boundary:
 
 ```text
 Linux kernel networking state
+
             |
+
             v
-        rtnetlink
+
+     Linux interfaces
+
             |
+
             v
-     Hostcheck collector
+
+     Hostcheck collectors
+
             |
+
             v
-      Hostcheck model
+
+      Hostcheck models
+
             |
+
             v
+
+     Network observation
+
+            |
+
+            v
+
      future presentation
 ```
 
@@ -1149,14 +1342,19 @@ Human-readable representations such as:
 
 ```text
 protocol=dhcp
+
 scope=link
+
 type=local
+
 interface=enp0s3
 ```
 
 can be produced later by a presentation layer.
 
-The core collector should not discard the underlying values merely because the final output may use human-readable names.
+The core collectors should not discard the underlying values merely because the final output may use human-readable names.
+
+The higher-level `Network` model provides correlation between independently collected interface and route state while retaining the raw kernel identifiers in the underlying models.
 
 ## Conclusion
 
@@ -1164,10 +1362,14 @@ The routing experiments established that Linux routing is a kernel-managed syste
 
 Hostcheck V1 therefore uses structured Linux networking information through rtnetlink rather than parsing command output or using legacy `/proc` route files as its production collection mechanism.
 
-The current collector preserves meaningful kernel route state including destination and source prefixes, gateways, output interface indexes, priorities, tables, protocols, scopes, route types, and flags.
+The current collector preserves meaningful kernel route state including destination and source prefixes, gateways, output interface indexes, priorities, tables, protocols, scopes, route types, flags, and multipath next hops.
 
-The collector does not attempt to reproduce Linux route selection, policy routing, connectivity, or packet forwarding.
+The low-level collectors remain deliberately close to the kernel representation. Interface indexes are preserved rather than prematurely converted into names, while the higher-level network snapshot provides the context required to correlate route interfaces with collected interface identity.
+
+The network snapshot is a best-effort observation assembled from multiple Linux kernel interfaces. `Network.ObservedAt` records the beginning of the collection cycle and provides temporal context, but the snapshot is not an atomic transaction.
+
+The collector does not attempt to reproduce Linux route selection, policy routing, connectivity testing, or packet forwarding.
 
 Those responsibilities remain with the Linux kernel.
 
-The remaining networking work is integration and deliberate scope expansion rather than replacing the underlying collection mechanism. In particular, route interface-index resolution, multipath representation, and the relationship between the route model and the broader Hostcheck network snapshot still need to be designed before they become part of V1.
+Further networking work should be deliberate scope expansion based on an actual Hostcheck requirement rather than additional collection for its own sake.
