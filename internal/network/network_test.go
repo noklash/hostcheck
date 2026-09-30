@@ -10,6 +10,10 @@ func TestReadNetwork(t *testing.T) {
 		t.Fatalf("ReadNetwork() error = %v", err)
 	}
 
+	if network.ObservedAt.IsZero() {
+		t.Fatal("expected non-zero observation timestamp")
+	}
+
 	if len(network.Interfaces) == 0 {
 		t.Fatal("ReadNetwork() returned no interfaces")
 	}

@@ -1,13 +1,19 @@
 package network
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type Network struct {
+	ObservedAt time.Time
 	Interfaces []Interface
 	Routes     []Route
 }
 
 func ReadNetwork() (Network, error) {
+	observedAt := time.Now()
+
 	names, err := EnumerateInterfaces()
 	if err != nil {
 		return Network{}, fmt.Errorf("enumerate interfaces: %w", err)
@@ -36,6 +42,7 @@ func ReadNetwork() (Network, error) {
 	}
 
 	return Network{
+		ObservedAt: observedAt,
 		Interfaces: interfaces,
 		Routes:     routes,
 	}, nil
