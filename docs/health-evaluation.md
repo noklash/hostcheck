@@ -17,6 +17,10 @@ The health layer must preserve the distinction between:
 
 The goal of V1 is to establish a defensible health evaluation boundary without introducing arbitrary thresholds or pretending that unavailable evidence represents a known healthy or unhealthy state.
 
+The current implementation provides independent subsystem assessments for memory and filesystem capacity. These assessments are evaluated from a `host.Snapshot` using explicit caller-supplied policies.
+
+An overall host health verdict is deliberately not implemented yet.
+
 ---
 
 ## Observation vs Assessment
@@ -238,13 +242,13 @@ instead of incorrectly claiming:
 Network is unhealthy.
 ```
 
+Collection errors remain evidence about the snapshot and are not themselves health statuses.
+
 ---
 
-## Assessment Status
+## Assessment Model
 
-Health assessment requires a status vocabulary that does not confuse health state with observability.
-
-The proposed V1 model separates two concepts.
+The current V1 health model separates two concepts.
 
 ### Availability
 
@@ -261,7 +265,7 @@ Unassessable
 
 Status describes the health conclusion when sufficient evidence exists.
 
-Possible V1 states are:
+Possible states are:
 
 ```text
 OK
@@ -269,30 +273,76 @@ DEGRADED
 CRITICAL
 ```
 
-These concepts should not be collapsed into one `UNKNOWN` value.
+These concepts are represented explicitly by the health assessment model.
+
+Conceptually:
+
+```go
+type Assessment struct {
+    Subject      string
+    Availability Availability
+    Status       Status
+    Reason       string
+    Evidence     []string
+}
+```
+
+An assessable assessment must have a valid health status.
+
+An unassessable assessment must not contain a health status.
 
 For example:
 
 ```text
-Network
-Availability: Unassessable
-Reason: collection failed
+Subject: memory
+Availability: unassessable
+Status:
+Reason: memory observation is unavailable
 ```
 
 is different from:
 
 ```text
-Network
-Availability: Assessable
-Status: DEGRADED
-Reason: explicit health policy determined the observed condition
+Subject: memory
+Availability: assessable
+Status: degraded
+Reason: available memory capacity is below the degraded policy threshold
 ```
 
 The first describes an evidence problem.
 
 The second describes a health condition.
 
-That distinction is important because treating both as `UNKNOWN` would hide why the assessment could not or did conclude something.
+The distinction is important because treating both as `UNKNOWN` would hide why the assessment could not or did conclude something.
+
+---
+
+## Assessment Validation
+
+Health assessments have explicit validation invariants.
+
+An assessment must:
+
+* identify a subject
+* use a valid availability state
+* provide a valid status when assessable
+* omit status when unassessable
+
+Conceptually:
+
+```text
+Assessable
+    ↓
+requires OK / DEGRADED / CRITICAL
+
+Unassessable
+    ↓
+must not contain a status
+```
+
+This validation prevents malformed health results from propagating into later output or aggregation layers.
+
+The health layer therefore validates both the semantic state and the relationship between availability and status.
 
 ---
 
@@ -300,10 +350,11 @@ That distinction is important because treating both as `UNKNOWN` would hide why 
 
 A health assessment should be explainable from the observations that produced it.
 
-A useful conceptual model is:
+The current assessment model retains:
 
 ```text
 Assessment
+
 ├── subject
 ├── availability
 ├── status
@@ -311,26 +362,29 @@ Assessment
 └── evidence
 ```
 
-The exact Go representation can be refined during implementation.
+The evidence belongs to the assessment because it allows the result to be understood and later inspected.
 
-The important requirement is that a health result should not become an opaque label.
-
-For example, a future filesystem assessment might conceptually contain:
+For example, a filesystem assessment can conceptually contain:
 
 ```text
 Subject: filesystem
+
 Availability: assessable
+
 Status: degraded
-Reason: available capacity crossed configured policy boundary
+
+Reason:
+available filesystem capacity is below the degraded policy threshold
+
 Evidence:
-    available bytes
-    available percentage
-    filesystem path
+available_percent=19.50
 ```
 
-The evidence belongs to the assessment because it allows the result to be understood and later inspected.
-
 The health layer should not replace the underlying observation with the status.
+
+The observation remains the evidence.
+
+The assessment is the interpretation of that evidence under an explicit policy.
 
 ---
 
@@ -376,30 +430,144 @@ Health policy can then decide what those observations mean operationally.
 
 ---
 
-## Current Health Inputs
+## Explicit Health Policy
 
-Not every Hostcheck observation is currently eligible to produce a health assessment.
+Health policies are supplied to the health evaluation layer rather than embedded inside Linux collectors.
 
-The current V1 boundary is intentionally conservative.
+The current implementation defines separate policies for memory and filesystem capacity.
 
-### CPU
+Conceptually:
 
-Available observations include CPU accounting counters and derived utilization where sufficient samples exist.
+```go
+type MemoryPolicy struct {
+    DegradedBelowPercent float64
+    CriticalBelowPercent float64
+}
 
-CPU counters themselves are not a health verdict.
+type FilesystemPolicy struct {
+    DegradedBelowPercent float64
+    CriticalBelowPercent float64
+}
+```
 
-A future CPU health rule may use derived utilization or other explicit evidence, but the rule must define:
+The policy boundaries follow these semantics:
 
-* required observations
-* required sampling relationship
-* calculation semantics
-* policy boundaries
+```text
+available >= degraded threshold
+    → OK
 
-A single CPU snapshot should not be treated as sufficient evidence for utilization-based health.
+critical threshold <= available < degraded threshold
+    → DEGRADED
+
+available < critical threshold
+    → CRITICAL
+```
+
+The exact threshold values are supplied by the caller.
+
+Hostcheck therefore does not currently establish universal default thresholds such as:
+
+```text
+Memory < 10% = CRITICAL
+Filesystem < 10% = CRITICAL
+```
+
+Those values remain policy.
 
 ---
 
-### Memory
+## Policy Validation
+
+Health policy must itself be valid before an assessment can be produced.
+
+The current policy rules require:
+
+* degraded threshold between 0 and 100
+* critical threshold between 0 and 100
+* critical threshold strictly below degraded threshold
+
+For example:
+
+```text
+Degraded: 20%
+Critical: 10%
+```
+
+is valid.
+
+While:
+
+```text
+Degraded: 10%
+Critical: 20%
+```
+
+is invalid.
+
+Invalid policy is different from insufficient observation evidence.
+
+Therefore:
+
+```text
+invalid policy
+    ↓
+evaluation error
+```
+
+rather than:
+
+```text
+invalid policy
+    ↓
+Unassessable
+```
+
+This distinction is important.
+
+An unassessable result describes a limitation in the evidence.
+
+An evaluation error describes a problem with the policy supplied to the evaluator.
+
+---
+
+## Current Health Evaluation Boundary
+
+The current implementation establishes the following boundary:
+
+```text
+Host Snapshot
+      ↓
+Validate health policy
+      ↓
+Evaluate subsystem observations
+      ↓
+Produce independent subsystem assessments
+```
+
+The current snapshot evaluator evaluates:
+
+* memory available capacity
+* filesystem available capacity
+
+The evaluator returns a collection of independent `Assessment` values.
+
+It does not currently produce:
+
+```text
+Overall Host = OK
+```
+
+or:
+
+```text
+Overall Host = DEGRADED
+```
+
+That aggregation decision remains deliberately unresolved.
+
+---
+
+## Memory
 
 Hostcheck collects Linux memory information from `/proc/meminfo`.
 
@@ -412,19 +580,75 @@ Memory observations include values such as:
 * cached memory
 * swap information where exposed
 
-The health layer must use the semantics of these Linux fields rather than treating similarly named values as interchangeable.
+The health layer uses the semantics of these Linux fields rather than treating similarly named values as interchangeable.
 
 In particular, `MemFree` must not automatically be interpreted as the amount of memory available to applications.
 
 `MemAvailable` provides a more meaningful basis for understanding memory availability on modern Linux systems.
 
-However, the existence of a memory observation does not establish a health threshold.
+The memory package derives available capacity as:
 
-No arbitrary memory percentage is currently defined as `DEGRADED` or `CRITICAL`.
+```text
+AvailablePercent =
+    Available / Total × 100
+```
+
+The derivation is performed by the memory observation layer.
+
+Health evaluation then applies an explicit `MemoryPolicy` to that derived observation.
+
+The current memory health flow is therefore:
+
+```text
+/proc/meminfo
+      ↓
+MemInfo
+      ↓
+AvailablePercent
+      ↓
+MemoryPolicy
+      ↓
+Assessment
+```
+
+For example:
+
+```text
+AvailablePercent = 50%
+Policy:
+    degraded below 20%
+    critical below 10%
+
+Result:
+    OK
+```
+
+If the memory observation is missing:
+
+```text
+Memory observation unavailable
+```
+
+the result is:
+
+```text
+Availability: Unassessable
+Status: empty
+```
+
+If the observation itself is invalid, such as:
+
+```text
+Available > Total
+```
+
+the memory assessment is also unassessable.
+
+The health layer does not reinterpret invalid memory accounting as a health failure.
 
 ---
 
-### Filesystem
+## Filesystem
 
 Filesystem observations include:
 
@@ -440,21 +664,51 @@ Filesystem observations include:
 
 These are legitimate health inputs because they describe finite host resources that can become constrained.
 
-However, the health layer must distinguish observation from policy.
+The filesystem observation layer already derives:
+
+```text
+AvailablePercent
+```
+
+from the filesystem block statistics.
+
+Health evaluation then applies an explicit `FilesystemPolicy`.
+
+The current filesystem health flow is:
+
+```text
+statfs
+  ↓
+filesystem.Stats
+  ↓
+AvailablePercent
+  ↓
+FilesystemPolicy
+  ↓
+Assessment
+```
 
 For example:
 
 ```text
 AvailablePercent = 8%
+
+Policy:
+    degraded below 20%
+    critical below 10%
 ```
 
-does not inherently mean:
+produces:
 
 ```text
-DEGRADED
+Status: CRITICAL
 ```
 
-The meaning of that value depends on an explicit health policy.
+because the observed value is below the configured critical boundary.
+
+The meaning of the value still comes from policy.
+
+The observation itself does not inherently mean `CRITICAL`.
 
 The same applies to inode availability.
 
@@ -462,9 +716,32 @@ A filesystem may have available storage capacity while being constrained by inod
 
 Health evaluation should therefore avoid reducing filesystem health to a single capacity percentage.
 
+The current concrete filesystem rule evaluates available block capacity only.
+
+Inode health remains a separate proposition that can be introduced when its policy and semantics are justified.
+
 ---
 
-### Processes
+## CPU
+
+Available observations include CPU accounting counters and derived utilization where sufficient samples exist.
+
+CPU counters themselves are not a health verdict.
+
+A future CPU health rule may use derived utilization or other explicit evidence, but the rule must define:
+
+* required observations
+* required sampling relationship
+* calculation semantics
+* policy boundaries
+
+A single CPU snapshot should not be treated as sufficient evidence for utilization-based health.
+
+The current health layer does not produce a CPU health assessment.
+
+---
+
+## Processes
 
 Hostcheck collects process-level observations including process identity, state, CPU information, memory information, and other `/proc/<pid>` data where available.
 
@@ -512,9 +789,11 @@ process Y must remain below a defined resource boundary
 
 Such rules belong to health policy, not generic process collection.
 
+The current health layer does not produce a process health assessment.
+
 ---
 
-### Network
+## Network
 
 Hostcheck currently observes several distinct parts of Linux networking:
 
@@ -654,9 +933,6 @@ Instead, each assessment should explicitly reflect whether its required evidence
 Conceptually:
 
 ```text
-CPU
-  assessable
-
 Memory
   assessable
 
@@ -664,7 +940,13 @@ Filesystem
   assessable
 
 Network
-  unassessable
+  no health rule currently defined
+```
+
+When a concrete health rule exists but its required observation is unavailable, the result is:
+
+```text
+Availability: Unassessable
 ```
 
 This is preferable to converting the entire snapshot into an unhealthy result.
@@ -699,6 +981,89 @@ The relationship between subsystem assessments and overall host assessment must 
 
 ---
 
+## Snapshot Evaluation
+
+The current snapshot evaluator provides the first integration boundary between individual health rules and the host snapshot.
+
+Conceptually:
+
+```text
+Host Snapshot
+      ↓
+Snapshot Policy
+      ↓
+Memory assessment
+      +
+Filesystem assessment
+      ↓
+[]Assessment
+```
+
+The evaluator currently uses:
+
+```go
+type SnapshotPolicy struct {
+    Memory     MemoryPolicy
+    Filesystem FilesystemPolicy
+}
+```
+
+The evaluator validates the supplied policy before producing assessments.
+
+Therefore:
+
+```text
+invalid policy
+    ↓
+evaluation error
+```
+
+For a valid policy:
+
+```text
+missing memory observation
+    ↓
+memory = Unassessable
+```
+
+```text
+missing filesystem observation
+    ↓
+filesystem = Unassessable
+```
+
+```text
+valid memory observation
+    ↓
+OK / DEGRADED / CRITICAL
+```
+
+```text
+valid filesystem observation
+    ↓
+OK / DEGRADED / CRITICAL
+```
+
+The snapshot evaluator does not combine these results into one host status.
+
+This is deliberate.
+
+The project has not yet established sufficient semantics to justify rules such as:
+
+```text
+worst status wins
+```
+
+or:
+
+```text
+any unassessable subsystem makes the host unassessable
+```
+
+Those are policy decisions that require explicit participation semantics.
+
+---
+
 ## Overall Host Assessment
 
 The overall host assessment is the most sensitive part of the health model because it can hide uncertainty if designed carelessly.
@@ -706,7 +1071,6 @@ The overall host assessment is the most sensitive part of the health model becau
 Consider:
 
 ```text
-CPU        OK
 Memory     OK
 Filesystem DEGRADED
 Network    Unassessable
@@ -734,10 +1098,12 @@ Configuration determines which subsystems are required and which are optional.
 For example:
 
 ```text
-CPU         required
 Memory      required
+
 Filesystem  required
+
 Network     optional
+
 Process     informational
 ```
 
@@ -747,7 +1113,7 @@ These semantics are not interchangeable.
 
 Hostcheck must explicitly choose and document the V1 model rather than silently implementing a "worst status wins" rule.
 
-Until that decision is made, the host snapshot should remain the stable integration boundary and health evaluation should not invent an overall host verdict.
+Until that decision is made, subsystem assessments should remain independent.
 
 ---
 
@@ -803,15 +1169,19 @@ The following are intentionally outside the current V1 health contract.
 
 ### Arbitrary resource thresholds
 
-Hostcheck does not currently define universal thresholds such as:
+Hostcheck does not establish universal thresholds such as:
 
 ```text
 CPU > 90% = CRITICAL
+
 Memory < 10% = CRITICAL
+
 Disk < 10% = CRITICAL
 ```
 
-These values may eventually exist as policy, but they must have an explicit justification and clear semantics.
+The current memory and filesystem rules accept thresholds from the caller.
+
+These values are policy, not Linux facts.
 
 ### Connectivity claims
 
@@ -883,9 +1253,13 @@ Conceptually:
 T0  host snapshot begins
 
 T1  CPU collected
+
 T2  memory collected
+
 T3  filesystem collected
+
 T4  processes collected
+
 T5  network collected
 
 T6  host collection completes
@@ -926,7 +1300,7 @@ Health evaluation must operate within those semantics.
 
 ## Health Evaluation Pipeline
 
-The intended architecture is:
+The implemented architecture is currently:
 
 ```text
 Linux
@@ -935,11 +1309,21 @@ Subsystem collection
   ↓
 Host Snapshot
   ↓
-Evidence validation
+Derived observations
   ↓
-Health evaluation
+Health policy validation
+  ↓
+Subsystem health evaluation
   ↓
 Subsystem assessments
+```
+
+The future overall host assessment remains separate:
+
+```text
+Subsystem assessments
+  ↓
+Defined participation semantics
   ↓
 Overall host assessment
 ```
@@ -958,13 +1342,27 @@ Read, parse, validate, and derive subsystem observations.
 
 Combines those observations into one host-level observation boundary and preserves collection errors.
 
+### Derived observation layer
+
+Calculates values that can be derived from collected Linux data.
+
+Examples include:
+
+```text
+Memory AvailablePercent
+Filesystem AvailablePercent
+CPU utilization
+```
+
+A derived observation remains an observation. It does not become a health status automatically.
+
 ### Health evaluation
 
-Determines whether the available observations are sufficient for defined health rules and evaluates those rules.
+Determines whether the available observations are sufficient for defined health rules and evaluates those rules against explicit policy.
 
 ### Overall assessment
 
-Combines subsystem assessments according to explicit participation semantics.
+Will eventually combine subsystem assessments according to explicit participation semantics.
 
 No layer should silently absorb the responsibilities of another.
 
@@ -972,15 +1370,21 @@ No layer should silently absorb the responsibilities of another.
 
 ## Health Rules
 
-A future health rule should define at least:
+A health rule should define at least:
 
 ```text
 Subject
+
 Required evidence
+
 Assessment condition
+
 Policy boundary
+
 Result
+
 Reason
+
 Evidence
 ```
 
@@ -988,6 +1392,7 @@ Conceptually:
 
 ```text
 Rule
+
 ├── subject
 ├── required evidence
 ├── applicability
@@ -996,7 +1401,7 @@ Rule
 └── explanation
 ```
 
-For example, a filesystem rule might eventually define:
+For example, the current filesystem capacity rule defines:
 
 ```text
 Subject:
@@ -1015,10 +1420,12 @@ Result:
     OK / DEGRADED / CRITICAL
 
 Evidence:
-    observed available capacity
+    observed available percentage
 ```
 
-The rule should not be embedded inside the filesystem collector.
+The rule is not embedded inside the filesystem collector.
+
+The same separation exists for memory.
 
 ---
 
@@ -1028,7 +1435,7 @@ Thresholds are not facts discovered from Linux.
 
 They are decisions about how observations should be interpreted.
 
-Therefore, a threshold should eventually be:
+Therefore, a threshold should be:
 
 * explicit
 * documented
@@ -1053,21 +1460,20 @@ A health policy should be understandable without reading implementation details.
 
 ## Health Results Should Be Explainable
 
-A future Hostcheck output should allow an operator to understand why a result exists.
+A Hostcheck health result should allow an operator to understand why it exists.
 
 For example:
 
 ```text
 Filesystem
+
 Status: DEGRADED
 
 Reason:
 Available capacity is below the configured policy boundary.
 
 Evidence:
-Path: /
-Available: ...
-AvailablePercent: ...
+available_percent=18.50
 ```
 
 This is preferable to:
@@ -1078,7 +1484,7 @@ Filesystem: DEGRADED
 
 because the latter forces the operator to inspect unrelated implementation details to understand the conclusion.
 
-Explainability also makes future testing easier.
+Explainability also makes testing easier.
 
 A test can verify not only that a status was produced, but that it was produced from the intended evidence.
 
@@ -1126,12 +1532,22 @@ The health layer should therefore be testable with scenarios such as:
 
 ```text
 Complete evidence
+
 Partial evidence
+
 Missing evidence
+
+Invalid observation
+
 Collection failure
+
 Insufficient samples
+
 Boundary values
+
 Explicit policy conditions
+
+Invalid policy
 ```
 
 Tests should verify both:
@@ -1152,28 +1568,29 @@ Health-policy tests should be deterministic.
 ### Complete observations
 
 ```text
-CPU        assessable
 Memory     assessable
 Filesystem assessable
-Network    assessable
 ```
 
 Health evaluation can evaluate the rules for which sufficient evidence exists.
+
+The current snapshot evaluator produces independent assessments for both subsystems.
 
 ---
 
 ### Network collection failure
 
 ```text
-CPU        assessable
 Memory     assessable
 Filesystem assessable
-Network    unassessable
+Network    collection failed
 ```
 
-The network assessment should communicate that network evidence is unavailable.
+The memory and filesystem assessments can still be evaluated.
 
-It should not automatically report the network as unhealthy.
+Network evidence remains unavailable.
+
+The network should not automatically be reported as unhealthy.
 
 ---
 
@@ -1181,6 +1598,7 @@ It should not automatically report the network as unhealthy.
 
 ```text
 CPU counters available
+
 CPU utilization unavailable
 ```
 
@@ -1194,6 +1612,7 @@ The CPU rule should remain unassessable if utilization is required and the neces
 
 ```text
 Available bytes: high
+
 Available inodes: low
 ```
 
@@ -1201,14 +1620,48 @@ The filesystem assessment must not reduce both observations to one capacity valu
 
 Capacity and inode availability are different resource dimensions.
 
+The current filesystem health rule evaluates available block capacity. Inode health remains a separate future rule.
+
+---
+
+### Memory observation unavailable
+
+```text
+Memory observation: unavailable
+```
+
+The current memory evaluator produces:
+
+```text
+Subject: memory
+
+Availability: unassessable
+
+Status:
+
+Reason:
+memory observation is unavailable
+```
+
+This does not become:
+
+```text
+Memory = CRITICAL
+```
+
+because the absence of evidence is not evidence of unhealthy memory.
+
 ---
 
 ### Interface state available
 
 ```text
 Interface: enp0s3
+
 State: UP
+
 Address: configured
+
 Route: configured
 ```
 
@@ -1220,29 +1673,58 @@ They do not automatically establish external connectivity.
 
 ## Current V1 Boundary
 
-The current V1 health boundary is therefore:
+The current V1 health boundary is:
 
 ```text
 Host Snapshot
+
     ↓
+
 Determine available evidence
+
     ↓
+
+Validate explicit health policy
+
+    ↓
+
 Determine whether a health rule is assessable
+
     ↓
-Evaluate explicit health policy
+
+Evaluate the health rule
+
     ↓
+
 Produce explainable subsystem assessment
+
     ↓
-Combine assessments only according to defined participation semantics
+
+Keep subsystem assessments independent
 ```
 
-The following remain deliberately unresolved until the semantics are reviewed:
+The current implementation has established:
 
-* exact Go assessment types
-* exact status representation
+* explicit assessment availability
+* explicit health status
+* assessment subjects
+* assessment reasons
+* retained evidence
+* assessment validation invariants
+* explicit memory policy
+* explicit filesystem policy
+* memory available-capacity evaluation
+* filesystem available-capacity evaluation
+* snapshot-level evaluation of those rules
+* invalid policy as an evaluation error
+* missing or invalid observation as `Unassessable`
+
+The following remain deliberately unresolved:
+
 * overall host participation rules
-* health thresholds
-* configurable policy
+* overall host status aggregation
+* universal health thresholds
+* configurable policy representation beyond current subsystem policies
 * structured health output
 * CLI presentation
 * persistence of historical assessments
@@ -1269,31 +1751,43 @@ Do not produce a health conclusion when the required evidence is unavailable.
 
 An inability to observe a subsystem is different from evidence that the subsystem is unhealthy.
 
-### 4. Preserve partial information
+### 4. Collection errors are not health statuses
+
+A collection error describes Hostcheck's observation capability.
+
+It should not automatically become `DEGRADED` or `CRITICAL`.
+
+### 5. Preserve partial information
 
 A failed subsystem should not invalidate successfully collected observations.
 
-### 5. Keep policy separate from collection
+### 6. Keep policy separate from collection
 
 Linux collectors should not contain arbitrary health thresholds.
 
-### 6. Preserve uncertainty
+### 7. Invalid policy is different from missing evidence
+
+A malformed policy should produce an evaluation error.
+
+Insufficient observation evidence should produce an unassessable assessment.
+
+### 8. Preserve uncertainty
 
 The system should explicitly communicate when a conclusion cannot be established.
 
-### 7. Make conclusions explainable
+### 9. Make conclusions explainable
 
 Every health result should be traceable to evidence and an explicit rule.
 
-### 8. Avoid false precision
+### 10. Avoid false precision
 
 A single snapshot should not be used to make conclusions that require historical data.
 
-### 9. Respect Linux semantics
+### 11. Respect Linux semantics
 
 Health rules must operate on what Linux fields actually mean rather than convenient assumptions.
 
-### 10. Keep the architecture small
+### 12. Keep the architecture small
 
 The health layer should solve the actual evaluation problem without introducing generic abstractions that are not yet justified.
 
@@ -1317,18 +1811,19 @@ In particular, V1 will not automatically provide:
 * service-level objectives
 * predictive failure detection
 
+The current implementation also does not provide an overall host health verdict.
+
 These can be added later when their evidence requirements and semantics are understood.
 
 The current priority is establishing a correct boundary between observation and health evaluation.
 
 ---
 
-````markdown
 ## Next Engineering Step
 
-The health contract has now been established against the `host.Snapshot` model.
+The health contract has now been implemented against the `host.Snapshot` model.
 
-The initial Go health model defines:
+The current Go health model defines:
 
 * assessment availability
 * health status
@@ -1336,10 +1831,17 @@ The initial Go health model defines:
 * reasons
 * retained evidence
 * validation invariants
+* explicit memory policy
+* explicit filesystem policy
+* snapshot-level evaluation
 
-The first concrete health rule evaluates filesystem available capacity using an explicit caller-supplied policy. The policy defines degraded and critical thresholds without establishing Hostcheck-wide default thresholds.
+The first concrete health rules now cover memory available capacity and filesystem available capacity.
 
-CPU, memory, process, and network observations currently remain outside concrete health evaluation rules. Their observations are available to the health layer, but the project has not yet established sufficient evidence and explicit policy to make health claims for them.
+Memory availability is derived from the Linux memory observation and evaluated against caller-supplied policy.
+
+Filesystem available capacity is derived from filesystem statistics and evaluated against caller-supplied policy.
+
+CPU, process, and network observations remain outside concrete health evaluation rules. Their observations are available to the system, but the project has not yet established sufficient evidence and explicit policy to make additional health claims.
 
 The next engineering step is to determine which additional health propositions can be justified from the existing snapshot model.
 
@@ -1362,13 +1864,17 @@ The implementation should continue to follow the smallest defensible model.
 
 ## Summary
 
-Hostcheck currently has a clear distinction between collecting host observations and evaluating host health.
+Hostcheck now has a clear distinction between collecting host observations and evaluating host health.
 
 The host snapshot is the integration boundary.
 
 Subsystem packages own Linux-specific observation and interpretation.
 
-The health layer consumes the snapshot and determines what can be concluded from the available evidence.
+Derived observation functions calculate values that can be established from those observations.
+
+The health layer consumes the snapshot and determines what can be concluded from the available evidence under explicit policy.
+
+The current implementation can independently assess memory and filesystem available capacity.
 
 The central rule is simple:
 
@@ -1385,15 +1891,21 @@ Collection failure ≠ Unhealthy
 
 Missing evidence ≠ Unhealthy
 
+Invalid policy ≠ Unhealthy
+
 Configuration ≠ Connectivity
 
 Single snapshot ≠ Historical trend
 
 Derived observation ≠ Health policy
-````
+```
 
-The health model now provides the foundation for explicit, deterministic assessment rules.
+The health model now provides a concrete foundation for explicit, deterministic assessment rules.
 
-The first concrete rule is filesystem available-capacity evaluation using caller-supplied policy. No universal Hostcheck health thresholds have been established.
+Memory and filesystem capacity evaluation are the first implemented rules.
+
+No universal Hostcheck health thresholds have been established.
+
+No overall host verdict has been established.
 
 Further health rules should be introduced only when the available evidence, assessment semantics, and policy are explicit enough to justify the conclusion.
