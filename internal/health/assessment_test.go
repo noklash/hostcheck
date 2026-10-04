@@ -17,11 +17,27 @@ func TestAssessmentValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "assessable with status",
+			name: "assessable with ok status",
 			assessment: Assessment{
 				Subject:      "memory",
 				Availability: Assessable,
 				Status:       OK,
+			},
+		},
+		{
+			name: "assessable with degraded status",
+			assessment: Assessment{
+				Subject:      "memory",
+				Availability: Assessable,
+				Status:       Degraded,
+			},
+		},
+		{
+			name: "assessable with critical status",
+			assessment: Assessment{
+				Subject:      "memory",
+				Availability: Assessable,
+				Status:       Critical,
 			},
 		},
 		{
