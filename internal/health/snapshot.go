@@ -7,8 +7,9 @@ import (
 )
 
 type SnapshotPolicy struct {
-	Memory     MemoryPolicy
-	Filesystem FilesystemPolicy
+	Memory          MemoryPolicy
+	Filesystem      FilesystemPolicy
+	FilesystemInode FilesystemInodePolicy
 }
 
 func (p SnapshotPolicy) Validate() error {
@@ -18,6 +19,10 @@ func (p SnapshotPolicy) Validate() error {
 
 	if err := p.Filesystem.Validate(); err != nil {
 		return fmt.Errorf("filesystem policy: %w", err)
+	}
+
+	if err := p.FilesystemInode.Validate(); err != nil {
+		return fmt.Errorf("filesystem inode policy: %w", err)
 	}
 
 	return nil
@@ -34,6 +39,7 @@ func EvaluateSnapshot(
 	assessments := []Assessment{
 		EvaluateMemory(snapshot, policy.Memory),
 		evaluateFilesystem(snapshot, policy.Filesystem),
+		evaluateFilesystemInodes(snapshot, policy.FilesystemInode),
 	}
 
 	return assessments, nil
@@ -73,6 +79,48 @@ func evaluateFilesystem(
 			Availability: Unassessable,
 			Reason: fmt.Sprintf(
 				"filesystem policy could not be evaluated: %v",
+				err,
+			),
+		}
+	}
+
+	return assessment
+}
+
+func evaluateFilesystemInodes(
+	snapshot host.Snapshot,
+	policy FilesystemInodePolicy,
+) Assessment {
+	if snapshot.Filesystem == nil {
+		return Assessment{
+			Subject:      "filesystem_inodes",
+			Availability: Unassessable,
+			Reason:       "filesystem inode observation is unavailable",
+		}
+	}
+
+	availablePercent, err := snapshot.Filesystem.AvailableInodePercent()
+	if err != nil {
+		return Assessment{
+			Subject:      "filesystem_inodes",
+			Availability: Unassessable,
+			Reason: fmt.Sprintf(
+				"filesystem inode observation cannot be evaluated: %v",
+				err,
+			),
+		}
+	}
+
+	assessment, err := EvaluateFilesystemAvailableInodePercent(
+		availablePercent,
+		policy,
+	)
+	if err != nil {
+		return Assessment{
+			Subject:      "filesystem_inodes",
+			Availability: Unassessable,
+			Reason: fmt.Sprintf(
+				"filesystem inode policy could not be evaluated: %v",
 				err,
 			),
 		}

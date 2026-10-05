@@ -18,6 +18,10 @@ func TestEvaluateSnapshot(t *testing.T) {
 			DegradedBelowPercent: 20,
 			CriticalBelowPercent: 10,
 		},
+		FilesystemInode: FilesystemInodePolicy{
+			DegradedBelowPercent: 20,
+			CriticalBelowPercent: 10,
+		},
 	}
 
 	snapshot := host.Snapshot{
@@ -28,6 +32,8 @@ func TestEvaluateSnapshot(t *testing.T) {
 		Filesystem: &filesystem.Stats{
 			BlocksTotal:     1000,
 			BlocksAvailable: 500,
+			InodesTotal:     1000,
+			InodesFree:      500,
 		},
 	}
 
@@ -36,8 +42,8 @@ func TestEvaluateSnapshot(t *testing.T) {
 		t.Fatalf("EvaluateSnapshot() error = %v", err)
 	}
 
-	if len(assessments) != 2 {
-		t.Fatalf("len(assessments) = %d, want 2", len(assessments))
+	if len(assessments) != 3 {
+		t.Fatalf("len(assessments) = %d, want 3", len(assessments))
 	}
 
 	if assessments[0].Subject != "memory" {
@@ -70,6 +76,21 @@ func TestEvaluateSnapshot(t *testing.T) {
 		)
 	}
 
+	if assessments[2].Subject != "filesystem_inodes" {
+		t.Fatalf(
+			"assessments[2].Subject = %q, want filesystem_inodes",
+			assessments[2].Subject,
+		)
+	}
+
+	if assessments[2].Status != OK {
+		t.Fatalf(
+			"filesystem inode status = %q, want %q",
+			assessments[2].Status,
+			OK,
+		)
+	}
+
 	for _, assessment := range assessments {
 		if err := assessment.Validate(); err != nil {
 			t.Fatalf(
@@ -91,6 +112,10 @@ func TestEvaluateSnapshotMarksMissingObservationsUnassessable(t *testing.T) {
 			DegradedBelowPercent: 20,
 			CriticalBelowPercent: 10,
 		},
+		FilesystemInode: FilesystemInodePolicy{
+			DegradedBelowPercent: 20,
+			CriticalBelowPercent: 10,
+		},
 	}
 
 	assessments, err := EvaluateSnapshot(host.Snapshot{}, policy)
@@ -98,8 +123,8 @@ func TestEvaluateSnapshotMarksMissingObservationsUnassessable(t *testing.T) {
 		t.Fatalf("EvaluateSnapshot() error = %v", err)
 	}
 
-	if len(assessments) != 2 {
-		t.Fatalf("len(assessments) = %d, want 2", len(assessments))
+	if len(assessments) != 3 {
+		t.Fatalf("len(assessments) = %d, want 3", len(assessments))
 	}
 
 	for _, assessment := range assessments {
@@ -137,6 +162,10 @@ func TestEvaluateSnapshotRejectsInvalidPolicy(t *testing.T) {
 			CriticalBelowPercent: 20,
 		},
 		Filesystem: FilesystemPolicy{
+			DegradedBelowPercent: 20,
+			CriticalBelowPercent: 10,
+		},
+		FilesystemInode: FilesystemInodePolicy{
 			DegradedBelowPercent: 20,
 			CriticalBelowPercent: 10,
 		},
