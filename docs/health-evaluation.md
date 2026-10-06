@@ -24,8 +24,9 @@ The current implementation supports independent health evaluation for:
 * filesystem available block capacity
 * filesystem available inode capacity
 * CPU utilization
+* process state, specifically processes observed in uninterruptible sleep (`D` state)
 
-CPU utilization is evaluated separately from the single-snapshot health evaluator because CPU utilization requires two samples.
+CPU utilization and process-state health are evaluated separately from the single-snapshot health evaluator for different reasons. CPU utilization requires two samples, while process-state health is currently kept as an independent rule rather than being prematurely incorporated into an overall snapshot verdict.
 
 ---
 
@@ -85,6 +86,7 @@ For example:
 * filesystem statistics cannot be collected
 * inode totals are unavailable
 * a required CPU sample is missing
+* process information cannot be evaluated
 
 These cases should not automatically become `critical`.
 
@@ -122,6 +124,18 @@ is not evidence that the host is unhealthy.
 It means the evaluator was given an invalid policy.
 
 The evaluator should therefore return an error rather than produce a misleading assessment.
+
+---
+
+### 5. Observation semantics must be respected
+
+Different Linux observations have different meanings.
+
+A cumulative CPU counter cannot be interpreted as utilization from one sample.
+
+Likewise, observing a process in `D` state tells us that the process was in uninterruptible sleep at the time of collection. It does not establish how long it remained there or whether the condition persisted.
+
+Health rules must therefore preserve the semantics and limitations of the underlying observations.
 
 ---
 
@@ -280,13 +294,13 @@ The filesystem observation includes:
 
 ```go
 type Stats struct {
-    Path             string
-    BlockSize        uint64
-    BlocksTotal      uint64
-    BlocksFree       uint64
-    BlocksAvailable  uint64
-    InodesTotal      uint64
-    InodesFree       uint64
+    Path            string
+    BlockSize       uint64
+    BlocksTotal     uint64
+    BlocksFree      uint64
+    BlocksAvailable uint64
+    InodesTotal     uint64
+    InodesFree      uint64
 }
 ```
 
@@ -409,17 +423,17 @@ The evaluation flow is therefore:
 
 ```text
 statfs
-    |
-    v
+  |
+  v
 filesystem.Stats
-    |
-    v
+  |
+  v
 AvailableInodePercent()
-    |
-    v
+  |
+  v
 FilesystemInodePolicy
-    |
-    v
+  |
+  v
 Assessment
 ```
 
@@ -567,6 +581,156 @@ The CPU rule therefore follows the same general architecture as the other health
 
 ---
 
+# Process-State Health
+
+Process-state health evaluates the number of processes observed in Linux's uninterruptible sleep state, represented by `D`.
+
+A process in `D` state is waiting in uninterruptible sleep, commonly while waiting on a kernel resource such as I/O.
+
+The presence of a `D`-state process is not by itself proof of host failure. The health rule therefore evaluates the observed count against an explicit policy.
+
+---
+
+## Process-State Observation
+
+The process collector already obtains process state from the process statistics exposed through `/proc`.
+
+Each process contains a state value as part of its process statistics:
+
+```text
+PID
+command
+state
+PPID
+...
+```
+
+The health evaluator counts processes whose observed state is:
+
+```text
+D
+```
+
+The result is an observation of the number of processes in uninterruptible sleep at the collection point.
+
+For example:
+
+```text
+d_state_processes=0
+```
+
+or:
+
+```text
+d_state_processes=3
+```
+
+The health rule does not infer persistence from this value.
+
+A process observed in `D` state during one collection does not establish that it remained in that state for a particular duration.
+
+---
+
+## Process-State Policy
+
+Process-state health uses:
+
+```go
+type ProcessStatePolicy struct {
+    DegradedAtOrAbove int
+    CriticalAtOrAbove int
+}
+```
+
+The policy defines count thresholds.
+
+For example:
+
+```text
+degraded at or above 2 processes
+critical at or above 5 processes
+```
+
+means:
+
+```text
+0-1 D-state processes -> OK
+2-4 D-state processes -> Degraded
+5+ D-state processes  -> Critical
+```
+
+The critical threshold must be greater than the degraded threshold.
+
+Negative thresholds are invalid.
+
+The thresholds are intentionally supplied by the caller rather than embedded in the process collector.
+
+---
+
+## Process-State Evaluation
+
+The evaluation flow is:
+
+```text
+/proc process observations
+        |
+        v
+process.Process
+        |
+        v
+count D-state processes
+        |
+        v
+ProcessStatePolicy
+        |
+        v
+Assessment
+```
+
+The resulting assessment uses:
+
+```text
+subject = process_state
+```
+
+and includes evidence such as:
+
+```text
+d_state_processes=3
+```
+
+A degraded assessment means that the observed D-state count reached the configured degraded threshold.
+
+A critical assessment means that the observed count reached the configured critical threshold.
+
+The rule does not claim that the processes are permanently stuck, that the underlying resource is definitely failing, or that the host is necessarily unhealthy overall.
+
+---
+
+## Why Process-State Health Is Standalone
+
+Process-state health could eventually participate in snapshot-level or host-level health evaluation.
+
+It is currently kept as a standalone rule because the operational meaning of D-state processes requires more context than the raw count alone can provide.
+
+For example:
+
+```text
+3 D-state processes
+```
+
+could have very different meanings depending on:
+
+* what those processes are doing
+* whether they are expected to perform blocking I/O
+* how long they remain in that state
+* whether the count is increasing
+* whether related filesystem or storage observations are degraded
+
+The current rule therefore establishes a defensible observation-to-policy boundary without pretending that a single process-state count provides a complete diagnosis.
+
+---
+
 # Snapshot Evaluation
 
 The host snapshot provides a boundary around observations collected from multiple Linux sources.
@@ -591,7 +755,7 @@ filesystem
 filesystem_inodes
 ```
 
-CPU is intentionally excluded from this evaluator.
+CPU and process-state health are intentionally excluded from this evaluator.
 
 ---
 
@@ -626,6 +790,42 @@ multi-sample evaluation
 The current design keeps that distinction explicit.
 
 The CPU rule can be evaluated independently once the caller has collected the required samples and derived utilization.
+
+---
+
+## Why Process-State Health Is Not in Snapshot Evaluation
+
+Process-state health can technically operate on the process observations contained in a snapshot.
+
+However, the current architecture deliberately keeps it as a standalone health rule.
+
+This prevents the snapshot evaluator from becoming an implicit host-health aggregator before the operational meaning of that aggregation has been defined.
+
+The process-state evaluator can consume the process observations directly:
+
+```text
+host.Snapshot.Processes
+        |
+        v
+EvaluateProcessState()
+        |
+        v
+process_state Assessment
+```
+
+This preserves the distinction between:
+
+```text
+an individual health rule
+```
+
+and:
+
+```text
+the overall health of the host
+```
+
+The two are not interchangeable.
 
 ---
 
@@ -675,6 +875,24 @@ The important rule is that missing data must not automatically become:
 critical
 ```
 
+### Process State
+
+If the process observations required to evaluate process state are unavailable or cannot be collected, the system should not manufacture a critical process-state result.
+
+The distinction remains:
+
+```text
+observation unavailable
+```
+
+versus:
+
+```text
+observation available and policy threshold exceeded
+```
+
+An observed D-state count is evidence about what was seen during collection. Failure to obtain the observation is an availability problem, not evidence of an unhealthy process state.
+
 ---
 
 # Invalid Policies
@@ -687,13 +905,15 @@ Examples of invalid policies include:
 degraded threshold outside valid range
 critical threshold outside valid range
 critical threshold not stricter than degraded threshold
+negative process-state threshold
+critical process-state threshold not greater than degraded threshold
 ```
 
 The evaluator returns an error for an invalid policy.
 
 This is intentionally different from returning:
 
-```text
+```go
 Assessment{
     Status: Critical,
 }
@@ -710,22 +930,22 @@ It is not evidence about the host.
 The overall architecture is:
 
 ```text
-                 Linux
-                   |
-                   v
-              Collectors
-                   |
-                   v
-          Raw Observations
-                   |
-                   v
-        Derived Observations
-                   |
-                   v
-            Health Rules
-                   |
-                   v
-             Assessments
+             Linux
+               |
+               v
+          Collectors
+               |
+               v
+      Raw Observations
+               |
+               v
+    Derived Observations
+               |
+               v
+        Health Rules
+               |
+               v
+         Assessments
 ```
 
 For memory:
@@ -734,7 +954,7 @@ For memory:
 /proc/meminfo
      |
      v
-MemInfo
+  MemInfo
      |
      v
 Available Capacity
@@ -794,10 +1014,28 @@ For CPU utilization:
       Delta
         |
         v
-   Utilization
+    Utilization
         |
         v
 CPUUtilizationPolicy
+        |
+        v
+    Assessment
+```
+
+For process-state health:
+
+```text
+/proc process observations
+        |
+        v
+   Process states
+        |
+        v
+ Count D-state processes
+        |
+        v
+ProcessStatePolicy
         |
         v
     Assessment
@@ -820,9 +1058,12 @@ The current V1 health layer includes:
 * filesystem available inode-capacity health evaluation
 * snapshot-level evaluation for memory and filesystem rules
 * CPU utilization health evaluation as a standalone rule
+* process-state health evaluation as a standalone rule
 * explicit policy validation
 * unassessable handling for missing or invalid observations
 * separation between collection, derived observations, and health policy
+* explicit handling of CPU multi-sample semantics
+* explicit handling of process-state snapshot semantics
 
 The current design deliberately does not attempt to provide:
 
@@ -830,12 +1071,14 @@ The current design deliberately does not attempt to provide:
 * automatic weighting of subsystems
 * automatic aggregation into a single host verdict
 * historical trend analysis
+* persistent D-state detection
 * alert routing
 * Prometheus integration
 * Kubernetes health integration
 * daemonized continuous monitoring
 * automatic remediation
 * CPU utilization inside the single-snapshot evaluator
+* process-state health inside an overall host verdict
 
 These concerns can be considered later when there is a concrete requirement for them.
 
@@ -860,6 +1103,7 @@ memory = OK
 filesystem = OK
 filesystem_inodes = Degraded
 cpu = Critical
+process_state = Degraded
 ```
 
 What should the host status be?
@@ -875,6 +1119,14 @@ rule would produce `critical`.
 But that is still a policy decision.
 
 A critical CPU utilization measurement over a short interval may have a very different operational meaning from an exhausted filesystem inode pool.
+
+Likewise:
+
+```text
+process_state = Degraded
+```
+
+does not necessarily mean that the host itself is degraded. The observed processes may be performing expected blocking operations, or the condition may disappear in the next observation.
 
 The health layer should therefore establish reliable subsystem assessments before introducing host-level aggregation.
 
@@ -906,6 +1158,20 @@ For CPU specifically, tests should also cover:
 * valid threshold ordering
 * invalid threshold ordering
 * threshold boundaries
+* generated evidence
+* standalone evaluation semantics
+* counter regression handling
+
+For process-state health, tests should cover:
+
+* valid process-state policies
+* negative threshold rejection
+* invalid threshold ordering
+* zero D-state processes
+* D-state count below the degraded threshold
+* D-state count at the degraded threshold
+* D-state count below the critical threshold
+* D-state count at the critical threshold
 * generated evidence
 * standalone evaluation semantics
 
@@ -972,6 +1238,8 @@ Filesystem inode capacity establishes that different resource dimensions should 
 
 CPU establishes that health evaluation must also account for observation semantics and sampling requirements.
 
+Process-state health establishes that process observations can support explicit operational policy while still requiring restraint about what a single observation can prove.
+
 The next health rules should follow the same discipline.
 
 A new rule should only be introduced when:
@@ -998,11 +1266,14 @@ Memory
 Filesystem block capacity
 Filesystem inode capacity
 CPU utilization
+Process state
 ```
 
 Memory, filesystem block capacity, and filesystem inode capacity can be evaluated from a single host snapshot.
 
 CPU utilization requires multiple cumulative CPU samples, so it is currently evaluated through a standalone CPU health evaluator rather than being embedded in the single-snapshot evaluator.
+
+Process-state health evaluates the observed number of processes in `D` state against explicit count thresholds. It remains a standalone rule because a single observation does not establish persistence or prove the underlying cause.
 
 This distinction keeps the system honest about what can and cannot be concluded from a single observation.
 
