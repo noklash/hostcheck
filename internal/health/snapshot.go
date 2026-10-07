@@ -7,9 +7,12 @@ import (
 )
 
 type SnapshotPolicy struct {
-	Memory          MemoryPolicy
-	Filesystem      FilesystemPolicy
-	FilesystemInode FilesystemInodePolicy
+	Memory            MemoryPolicy
+	Filesystem        FilesystemPolicy
+	FilesystemInode   FilesystemInodePolicy
+	ProcessState      *ProcessStatePolicy
+	NetworkInterfaces []NetworkInterfacePolicy
+	NetworkRoutes     []NetworkRoutePolicy
 }
 
 func (p SnapshotPolicy) Validate() error {
@@ -25,6 +28,32 @@ func (p SnapshotPolicy) Validate() error {
 		return fmt.Errorf("filesystem inode policy: %w", err)
 	}
 
+	if p.ProcessState != nil {
+		if err := p.ProcessState.Validate(); err != nil {
+			return fmt.Errorf("process state policy: %w", err)
+		}
+	}
+
+	for i, policy := range p.NetworkInterfaces {
+		if err := policy.Validate(); err != nil {
+			return fmt.Errorf(
+				"network interface policy %d: %w",
+				i,
+				err,
+			)
+		}
+	}
+
+	for i, policy := range p.NetworkRoutes {
+		if err := policy.Validate(); err != nil {
+			return fmt.Errorf(
+				"network route policy %d: %w",
+				i,
+				err,
+			)
+		}
+	}
+
 	return nil
 }
 
@@ -36,10 +65,85 @@ func EvaluateSnapshot(
 		return nil, err
 	}
 
-	assessments := []Assessment{
+	assessments := make([]Assessment, 0, 3+
+		boolToInt(policy.ProcessState != nil)+
+		len(policy.NetworkInterfaces)+
+		len(policy.NetworkRoutes))
+
+	assessments = append(
+		assessments,
 		EvaluateMemory(snapshot, policy.Memory),
 		evaluateFilesystem(snapshot, policy.Filesystem),
 		evaluateFilesystemInodes(snapshot, policy.FilesystemInode),
+	)
+
+	if policy.ProcessState != nil {
+		if err := snapshotCollectionError(snapshot, "process"); err != nil {
+			assessments = append(assessments, Assessment{
+				Subject:      "process_state",
+				Availability: Unassessable,
+				Reason: fmt.Sprintf(
+					"process collection failed: %v",
+					err,
+				),
+			})
+		} else {
+			assessment, err := EvaluateProcessState(
+				snapshot.Processes,
+				*policy.ProcessState,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			assessments = append(assessments, assessment)
+		}
+	}
+
+	if len(policy.NetworkInterfaces) > 0 {
+		for _, interfacePolicy := range policy.NetworkInterfaces {
+			if snapshot.Network == nil {
+				assessments = append(assessments, Assessment{
+					Subject:      "network_interface",
+					Availability: Unassessable,
+					Reason:       networkObservationUnavailableReason(snapshot),
+				})
+				continue
+			}
+
+			assessment, err := EvaluateNetworkInterface(
+				*snapshot.Network,
+				interfacePolicy,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			assessments = append(assessments, assessment)
+		}
+	}
+
+	if len(policy.NetworkRoutes) > 0 {
+		for _, routePolicy := range policy.NetworkRoutes {
+			if snapshot.Network == nil {
+				assessments = append(assessments, Assessment{
+					Subject:      "network_route",
+					Availability: Unassessable,
+					Reason:       networkObservationUnavailableReason(snapshot),
+				})
+				continue
+			}
+
+			assessment, err := EvaluateNetworkRoute(
+				*snapshot.Network,
+				routePolicy,
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			assessments = append(assessments, assessment)
+		}
 	}
 
 	return assessments, nil
@@ -53,7 +157,7 @@ func evaluateFilesystem(
 		return Assessment{
 			Subject:      "filesystem",
 			Availability: Unassessable,
-			Reason:       "filesystem observation is unavailable",
+			Reason:       observationUnavailableReason(snapshot, "filesystem"),
 		}
 	}
 
@@ -95,7 +199,10 @@ func evaluateFilesystemInodes(
 		return Assessment{
 			Subject:      "filesystem_inodes",
 			Availability: Unassessable,
-			Reason:       "filesystem inode observation is unavailable",
+			Reason: observationUnavailableReason(
+				snapshot,
+				"filesystem",
+			),
 		}
 	}
 
@@ -127,4 +234,54 @@ func evaluateFilesystemInodes(
 	}
 
 	return assessment
+}
+
+func observationUnavailableReason(
+	snapshot host.Snapshot,
+	subsystem string,
+) string {
+	if err := snapshotCollectionError(snapshot, subsystem); err != nil {
+		return fmt.Sprintf(
+			"%s collection failed: %v",
+			subsystem,
+			err,
+		)
+	}
+
+	return fmt.Sprintf(
+		"%s observation is unavailable",
+		subsystem,
+	)
+}
+
+func networkObservationUnavailableReason(snapshot host.Snapshot) string {
+	if err := snapshotCollectionError(snapshot, "network"); err != nil {
+		return fmt.Sprintf(
+			"network collection failed: %v",
+			err,
+		)
+	}
+
+	return "network observation is unavailable"
+}
+
+func snapshotCollectionError(
+	snapshot host.Snapshot,
+	subsystem string,
+) error {
+	for _, collectionError := range snapshot.Errors {
+		if collectionError.Subsystem == subsystem {
+			return collectionError.Err
+		}
+	}
+
+	return nil
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+
+	return 0
 }
