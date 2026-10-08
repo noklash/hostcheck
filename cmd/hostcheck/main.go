@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"time"
@@ -15,6 +16,13 @@ const (
 )
 
 func main() {
+	jsonOutput := flag.Bool(
+		"json",
+		false,
+		"write the health result as JSON",
+	)
+	flag.Parse()
+
 	snapshot := host.Collect(host.Config{})
 
 	result, err := health.Evaluate(snapshot, defaultPolicy())
@@ -23,7 +31,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	printResult(snapshot, result)
+	if *jsonOutput {
+		if err := printJSONResult(os.Stdout, snapshot, result); err != nil {
+			fmt.Fprintf(os.Stderr, "JSON output failed: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		printResult(snapshot, result)
+	}
+
 	os.Exit(exitCode(result))
 }
 
