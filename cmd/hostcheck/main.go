@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/noklash/hostcheck/internal/health"
 	"github.com/noklash/hostcheck/internal/host"
@@ -37,7 +36,10 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		printResult(snapshot, result)
+		if err := printResult(os.Stdout, snapshot, result); err != nil {
+			fmt.Fprintf(os.Stderr, "output failed: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	os.Exit(exitCode(result))
@@ -77,29 +79,4 @@ func exitCode(result health.Result) int {
 	}
 
 	return 1
-}
-
-func printResult(snapshot host.Snapshot, result health.Result) {
-	fmt.Printf("hostcheck\n")
-	fmt.Printf(
-		"observed_at: %s\n",
-		snapshot.ObservedAt.Format(time.RFC3339),
-	)
-	fmt.Printf("status: %s\n", result.Status)
-	fmt.Printf("coverage: %s\n", result.Coverage)
-	fmt.Printf("\n")
-
-	for _, assessment := range result.Assessments {
-		if assessment.Availability == health.Unassessable {
-			fmt.Printf("[unassessable] %s\n", assessment.Subject)
-		} else {
-			fmt.Printf("[%s] %s\n", assessment.Status, assessment.Subject)
-		}
-
-		fmt.Printf("  %s\n", assessment.Reason)
-
-		for _, evidence := range assessment.Evidence {
-			fmt.Printf("  %s\n", evidence)
-		}
-	}
 }
