@@ -1,170 +1,302 @@
 # hostcheck
 
-A Linux host health and reliability agent written in Go.
+**A Linux host health and reliability agent written in Go.**
 
-hostcheck reads operating-system interfaces exposed by Linux and turns them into structured host observations, derived measurements, health assessments, and explainable host-level results.
+hostcheck collects operating-system observations directly from Linux interfaces and turns them into structured host snapshots, derived measurements, health assessments, and explainable host-level results.
 
-The project is built from the kernel interfaces upward. Each subsystem is researched, experimentally verified, implemented, tested, documented, and then integrated into the larger host model.
+The project is built from the kernel interfaces upward. Each subsystem is researched, experimentally verified, implemented, tested, documented, and integrated into the larger host model.
 
 The guiding principle is:
 
-> Understand the system first. Then build the tool.
+> First understand the system. Then build the tool.
 
-hostcheck currently operates as a **one-shot Linux host health agent**. It collects a host snapshot, evaluates explicitly configured health policies, produces explainable results, and exposes those results through human-readable or structured JSON output.
+hostcheck currently operates as a **one-shot Linux host health agent**. It collects a host snapshot, evaluates explicit health policies, aggregates the resulting assessments, and reports the outcome through human-readable or structured JSON output.
+
+V1 focuses on reliable host observation, explicit health semantics, transparent failure handling, and a clear separation between Linux collection and application behavior.
 
 Continuous monitoring, exporters, dashboards, orchestration integrations, remote collection, and automatic remediation remain outside the current V1 scope.
 
 ---
 
+## Table of Contents
+
+* [Objective](#objective)
+* [Current State](#current-state)
+* [Quick Start](#quick-start)
+* [V1 Application](#v1-application)
+* [Human-Readable Output](#human-readable-output)
+* [JSON Output](#json-output)
+* [Exit Codes](#exit-codes)
+* [Architecture](#architecture)
+* [Host Snapshot](#host-snapshot)
+* [Health Evaluation](#health-evaluation)
+* [Memory Health](#memory-health)
+* [Filesystem Health](#filesystem-health)
+* [Process Health](#process-health)
+* [Network Health](#network-health)
+* [CPU Accounting and Utilization](#cpu-accounting-and-utilization)
+* [Linux Collection Interfaces](#linux-collection-interfaces)
+* [Experiments](#experiments)
+* [Testing and Validation](#testing-and-validation)
+* [Repository Structure](#repository-structure)
+* [Failure Handling and Environmental Differences](#failure-handling-and-environmental-differences)
+* [Documentation](#documentation)
+* [Engineering Approach](#engineering-approach)
+* [Design Principles](#design-principles)
+* [Current V1 Scope](#current-v1-scope)
+* [Deliberately Out of Scope for V1](#deliberately-out-of-scope-for-v1)
+* [Configuration](#configuration)
+* [Recommended First Run](#recommended-first-run)
+* [Development Workflow](#development-workflow)
+* [V1 Completion Criteria](#v1-completion-criteria)
+* [Project Direction](#project-direction)
+* [Philosophy](#philosophy)
+
+---
+
 ## Objective
 
-Build a small but technically defensible Linux host inspection and health agent that can answer reliability questions directly from the operating system.
+Build a small, technically defensible Linux host inspection and health agent that can answer reliability questions using observations from the operating system.
 
 The project has two related objectives:
 
 1. Understand the Linux interfaces that expose host state.
 2. Encode that understanding into a reliable, testable, and explainable system.
 
-hostcheck deliberately separates:
+hostcheck separates observation, derivation, policy, assessment, aggregation, and presentation.
 
 ```text
 Linux observation
-      |
-      v
+       |
+       v
 Derived measurements
-      |
-      v
+       |
+       v
 Health policy
-      |
-      v
+       |
+       v
 Assessment
-      |
-      v
+       |
+       v
 Aggregation
-      |
-      v
+       |
+       v
 Application output
 ```
 
-This separation prevents raw operating-system measurements from becoming accidentally coupled to arbitrary health thresholds or presentation logic.
+Each stage has a distinct responsibility.
 
----
+Collectors report what Linux exposes. Derived calculations interpret raw measurements. Health policies define acceptable operating conditions. Assessments explain the decisions made by those policies. Aggregation combines the assessments into a host-level result, while the application presents that result to an operator or another program.
+
+This separation prevents raw operating-system measurements from becoming coupled to arbitrary thresholds or presentation logic.
 
 ## Current State
 
-hostcheck currently has the following major layers:
+hostcheck has a working one-shot command-line application backed by Linux subsystem collectors and a separate health evaluation layer.
+
+The current implementation covers five major areas of host observation:
+
+* CPU accounting.
+* System memory.
+* Filesystem capacity and inode availability.
+* Process statistics, CPU accounting, and memory accounting.
+* Network interfaces, addresses, routes, and multipath route information.
+
+The host model combines subsystem observations into a common snapshot. The health layer evaluates supported policies and produces assessments containing availability, status, reasons, and supporting evidence.
+
+The application supports human-readable output and structured JSON, along with process exit codes for shell automation.
+
+The human-readable report includes:
+
+* Observation timestamp.
+* Host-level status and coverage.
+* Collection results.
+* CPU accounting counters.
+* Memory statistics and derived capacity.
+* Filesystem capacity and inode information.
+* Process totals and state information.
+* Network interfaces, addresses, and routes.
+* Health assessments with explanations and evidence.
+
+CPU utilization is explicitly identified as not evaluated in the single-snapshot path because meaningful utilization requires a second observation.
+
+The repository also contains subsystem tests, controlled Linux experiments, and documentation describing accounting behavior and implementation decisions.
+
+The current application flow is:
 
 ```text
-Linux kernel / operating-system interfaces
-                  |
-                  v
-             Collectors
-                  |
-                  v
-          Host Snapshot
-                  |
-                  v
-       Derived observations
-                  |
-                  v
-        Health evaluation
-                  |
-                  v
-       Host-level Result
-                  |
-          +-------+-------+
-          |               |
-          v               v
-     Human output      JSON output
+Linux interfaces
+       |
+       v
+   Collectors
+       |
+       v
+ Host Snapshot
+       |
+       v
+Assessment orchestration
+       |
+       v
+  Aggregation
+       |
+       v
+ Health Result
+       |
+       +----------------+
+       |                |
+       v                v
+ Human-readable      JSON output
+     output
 ```
 
-The project currently collects five major Linux subsystems:
-
-* CPU accounting
-* Memory
-* Filesystem capacity and inode usage
-* Processes
-* Network interfaces, addresses, and routes
-
-The collectors remain responsible for observing Linux state.
-
-Derived calculations remain separate from raw collection.
-
-Health evaluation applies explicit policies to observations.
-
-The aggregation layer combines individual assessments into a host-level result containing:
-
-* status
-* coverage
-* individual assessments
-
-The application layer in `cmd/hostcheck` connects these components into a usable one-shot command.
+The project is deliberately developed from the behavior of the underlying operating system rather than from assumptions inherited from generic monitoring frameworks.
 
 ---
 
-# V1 Application
+## Quick Start
 
-The current application entrypoint is:
+### Requirements
 
-```text
-cmd/hostcheck/
+hostcheck currently requires:
+
+* Linux.
+* Go.
+* Access to the Linux interfaces used by its collectors.
+
+The project is Linux-specific because it relies on interfaces such as `/proc`, `statfs`, and rtnetlink.
+
+Check your installed Go version:
+
+```bash
+go version
 ```
 
-Run the host health check with:
+### Clone the repository
+
+```bash
+git clone https://github.com/noklash/hostcheck.git
+cd hostcheck
+```
+
+### Run the tests
+
+```bash
+go test ./...
+```
+
+### Run static analysis
+
+```bash
+go vet ./...
+```
+
+### Build the packages
+
+```bash
+go build ./...
+```
+
+### Run the host health agent
+
+Human-readable output:
 
 ```bash
 go run ./cmd/hostcheck
 ```
 
-A successful run currently produces output similar to:
-
-```text
-hostcheck
-observed_at: 2026-10-08T07:58:07+01:00
-status: ok
-coverage: complete
-
-[ok] memory
-  available memory capacity is within the configured policy
-  available_percent=48.21
-
-[ok] filesystem
-  available filesystem capacity is within the configured policy
-  available_percent=49.78
-
-[ok] filesystem_inodes
-  available filesystem inodes are within the configured policy
-  available_inode_percent=88.60
-```
-
-The application currently uses explicit default policies for:
-
-* available memory
-* filesystem available capacity
-* filesystem available inodes
-
-The default thresholds are:
-
-```text
-degraded: below 20%
-critical: below 10%
-```
-
-These are application defaults, not universal Linux health truths.
-
-Process-state and network-interface or route policies are not enabled by default because those checks require operator-specific expectations about which processes, interfaces, and routes should exist on a particular host.
-
----
-
-## JSON Output
-
-The application supports structured JSON output:
+Structured JSON output:
 
 ```bash
 go run ./cmd/hostcheck --json
 ```
 
-Example:
+These commands execute the one-shot application against the Linux host on which they run.
+
+---
+
+## V1 Application
+
+The application entry point is:
+
+```text
+cmd/hostcheck/
+```
+
+The command connects collection, host snapshot integration, health evaluation, aggregation, and output.
+
+Its responsibility is to orchestrate the existing components and present the resulting health report. It should not duplicate Linux collection logic or independently implement the health model.
+
+The application currently uses explicit default policies for:
+
+* Available memory capacity.
+* Available filesystem capacity.
+* Available filesystem inodes.
+
+The default thresholds are:
+
+| Resource                      |  Degraded |  Critical |
+| ----------------------------- | --------: | --------: |
+| Available memory              | Below 20% | Below 10% |
+| Available filesystem capacity | Below 20% | Below 10% |
+| Available filesystem inodes   | Below 20% | Below 10% |
+
+These thresholds are application defaults, not universal definitions of Linux health. Different workloads and operating environments may require different policies.
+
+Process-state and network-interface or route policies are supported by the health layer, but they are not enabled by default in the current CLI policy. Those checks require explicit expectations about which processes, interfaces, and routes should exist on a particular host.
+
+CPU utilization is also not evaluated from a single snapshot.
+
+### Application responsibilities
+
+The application should:
+
+1. Collect the available host observations.
+2. Preserve collection errors.
+3. Construct the host snapshot.
+4. Run the configured health evaluation.
+5. Aggregate the assessments.
+6. Produce a human-readable or JSON report.
+7. Return an exit code consistent with the resulting host-level status.
+
+The application consumes the health result instead of duplicating health evaluation and aggregation logic.
+
+---
+
+## Human-Readable Output
+
+Run the application without the JSON flag:
+
+```bash
+go run ./cmd/hostcheck
+```
+
+The report presents the collected host information and the result of the configured health assessments.
+
+A successful run reports the observation timestamp, host-level status, coverage, subsystem information, and assessment details.
+
+The exact output and measurements depend on the current implementation and the host being inspected.
+
+An assessment contains a status, an explanation, and evidence where applicable. This allows an operator to understand the basis of a health decision instead of receiving only a single status label.
+
+For example, a memory assessment may communicate that available memory is within the configured policy and include the measured available-memory percentage.
+
+The report also distinguishes collected CPU accounting counters from CPU utilization. The counters can be collected from one observation, but utilization requires multiple observations.
+
+The human-readable report is intended for direct inspection and troubleshooting. Structured JSON provides the machine-readable representation.
+
+---
+
+## JSON Output
+
+hostcheck supports structured JSON output:
+
+```bash
+go run ./cmd/hostcheck --json
+```
+
+The JSON representation exposes the host-level result and the individual assessments that produced it.
+
+An illustrative assessment structure is:
 
 ```json
 {
@@ -203,20 +335,22 @@ Example:
 }
 ```
 
-JSON is intended to provide a stable integration boundary without forcing the internal health model to depend on a particular output format.
+This is an illustrative response, not a guaranteed output from every run. Actual measurements and timestamps depend on the host.
 
-The JSON representation preserves:
+The JSON representation preserves the host-level status and coverage alongside assessment information, including:
 
-* observation timestamp
-* host status
-* coverage
-* assessment subject
-* assessment availability
-* assessment status when applicable
-* reason
-* evidence
+* Observation timestamp.
+* Assessment subject.
+* Assessment availability.
+* Assessment status when applicable.
+* Reason for the assessment.
+* Supporting evidence.
 
-An unavailable assessment does not automatically become a failed health assessment. Its availability is represented explicitly.
+JSON provides a structured integration boundary without requiring the internal health model to depend on a particular presentation format.
+
+An unassessable observation is represented explicitly. A collection or evaluation failure does not automatically become a critical health assessment.
+
+The JSON output should be interpreted together with the exit code when the command is used by shell scripts or other programs.
 
 ---
 
@@ -224,7 +358,7 @@ An unavailable assessment does not automatically become a failed health assessme
 
 The command provides process exit codes suitable for shell automation and future operational integration.
 
-Current semantics are:
+The current exit-code policy is:
 
 | Result                     | Exit code |
 | -------------------------- | --------: |
@@ -234,81 +368,91 @@ Current semantics are:
 | Unavailable                |       `1` |
 | Invalid application result |       `1` |
 
-The exit code communicates the host-level result without replacing the detailed assessment information.
+Exit codes communicate the host-level result without replacing the detailed report.
 
-JSON or human-readable output should be used when the caller needs the actual explanation.
+A caller can use the exit code to determine whether the command returned an OK, degraded, critical, or unavailable outcome. Human-readable or JSON output provides the details needed to understand the decision.
+
+The distinction between degraded and critical results allows callers to respond differently to resource conditions.
+
+An unavailable result indicates that a usable host-level assessment could not be established.
 
 ---
 
-# Architecture
+## Architecture
 
-The current architecture is:
+hostcheck is organized around Linux observation, explicit data models, derived measurements, and health evaluation.
 
 ```text
-                    Linux
-                     |
-        +------------+------------+
-        |            |            |
-       /proc       statfs      rtnetlink
-        |            |            |
-        v            v            v
-     Collectors   Collectors   Collectors
-        |            |            |
-        +------------+------------+
-                     |
-                     v
-              Host Snapshot
-                     |
-                     v
-          Derived Observations
-                     |
-                     v
-             Health Policies
-                     |
-                     v
-              Assessments
-                     |
-                     v
-                Aggregate
-                     |
-                     v
-             Health Result
-                /       \
-               /         \
-              v           v
-          Human          JSON
-           CLI           Output
+                         Linux
+                           |
+           +---------------+---------------+
+           |               |               |
+           v               v               v
+        /proc            statfs        rtnetlink
+           |               |               |
+           v               v               v
+       Collectors      Collectors      Collectors
+           |               |               |
+           +---------------+---------------+
+                           |
+                           v
+                     Host Snapshot
+                           |
+                           v
+                  Derived Observations
+                           |
+                           v
+                    Health Policies
+                           |
+                           v
+                      Assessments
+                           |
+                           v
+                      Aggregation
+                           |
+                           v
+                     Health Result
+                           |
+                    +------+------+
+                    |             |
+                    v             v
+             Human-readable     JSON
+                 output        output
 ```
-
-The important architectural boundaries are:
 
 ### Collection
 
-Collect operating-system state without deciding whether that state is healthy.
+Collection reads operating-system state and preserves the information needed by higher layers.
+
+A collector should not decide whether an observation is healthy simply because it can read a value. Collection and policy evaluation have different responsibilities.
 
 ### Derivation
 
-Calculate values that require interpretation of raw counters or filesystem values.
+Derivation calculates measurements that require interpretation of raw values.
 
 Examples include:
 
-* CPU utilization
-* available memory percentage
-* filesystem available capacity percentage
-* available inode percentage
-* process CPU utilization
+* CPU utilization from counter deltas.
+* Available memory percentage.
+* Available filesystem capacity percentage.
+* Available inode percentage.
+* Process CPU utilization.
+
+Derived calculations remain separate from the raw observations on which they depend.
 
 ### Policy
 
-Define explicit rules for determining whether an observation is acceptable.
+Health policies define acceptable conditions for a particular operational context.
 
-Policies are caller-supplied rather than hidden inside collectors.
+A policy might specify the minimum acceptable percentage of available memory or the expected operational state of a network interface.
+
+Thresholds and expectations belong in the health layer rather than being hidden inside collectors.
 
 ### Assessment
 
-Turn an observation and a policy into an explainable assessment.
+An assessment represents an evaluation of a particular health condition.
 
-An assessment contains:
+The core model is:
 
 ```go
 type Assessment struct {
@@ -320,11 +464,15 @@ type Assessment struct {
 }
 ```
 
+The model separates whether a condition can be evaluated from the health status assigned to it.
+
+The explanation and evidence make an assessment useful beyond its status alone.
+
 ### Aggregation
 
-Combine individual assessments into a host-level result.
+Aggregation combines individual assessments into a host-level result.
 
-The result contains:
+The result model is:
 
 ```go
 type Result struct {
@@ -334,37 +482,37 @@ type Result struct {
 }
 ```
 
+Aggregation preserves both the overall status and the coverage of the evaluation.
+
 ### Application
 
 The command-line application connects collection, evaluation, aggregation, and output.
 
-The application should remain thin.
-
-It should not become the place where Linux semantics, collection logic, or health policy are hidden.
+The application layer should remain thin. Linux-specific collection behavior belongs in the relevant subsystem packages, while health semantics belong in the health layer.
 
 ---
 
-# Host Snapshot
+## Host Snapshot
 
-The host boundary is represented by:
+The host integration boundary is represented by `host.Snapshot`.
+
+Its current model includes:
 
 ```go
 type Snapshot struct {
     ObservedAt time.Time
-
     CPU        *cpu.Stat
     Memory     *memory.MemInfo
     Filesystem *filesystem.Stats
     Processes  []process.Process
     Network    *network.Network
-
-    Errors []CollectionError
+    Errors     []CollectionError
 }
 ```
 
-The snapshot provides a common integration boundary for subsystem observations.
+The snapshot brings subsystem observations together without requiring every subsystem to share the same collection mechanism.
 
-It also records collection failures explicitly:
+Collection failures are represented explicitly:
 
 ```go
 type CollectionError struct {
@@ -373,37 +521,39 @@ type CollectionError struct {
 }
 ```
 
-Collection is currently sequential.
+This allows the host model to preserve information about which subsystem failed and why.
 
-`ObservedAt` therefore represents the snapshot boundary rather than an assertion that every subsystem was observed at exactly the same instant.
+### Snapshot semantics
 
-A Linux host is changing while it is being inspected. The snapshot is consequently a best-effort observation of the host at a point in the collection process.
+Collection is sequential in the current implementation. The host timestamp represents the snapshot's observation boundary, not a claim that every subsystem was measured at precisely the same instant.
 
----
+Linux continues changing while it is being inspected. Processes can exit, counters can advance, network interfaces can change state, and routes can be updated between individual reads.
 
-# Health Evaluation
+A host snapshot is therefore a best-effort representation of the host during the collection process.
 
-Health evaluation is deliberately separate from collection.
-
-The health layer currently supports:
-
-* memory available capacity
-* filesystem available capacity
-* filesystem available inode capacity
-* process-state policy
-* network-interface policy
-* network-route policy
-* host-level aggregation
-
-CPU utilization assessment exists as a standalone health capability because meaningful CPU utilization requires multiple observations.
-
-It is intentionally not treated as a single-snapshot health measurement.
+The model should preserve that distinction rather than imply atomicity that the underlying interfaces do not provide.
 
 ---
 
-## Availability
+## Health Evaluation
 
-An observation can be either:
+Health evaluation is separate from Linux collection.
+
+The health layer supports policies for:
+
+* Available memory capacity.
+* Available filesystem capacity.
+* Available filesystem inode capacity.
+* Process state.
+* Network-interface state.
+* Network routes.
+* Host-level assessment aggregation.
+
+CPU utilization assessment is available as a separate capability because it requires multiple observations.
+
+### Availability
+
+An assessment can be either:
 
 ```text
 assessable
@@ -415,23 +565,17 @@ or:
 unassessable
 ```
 
-An unavailable observation does not automatically become `critical`.
+An assessable observation contains sufficient information to evaluate the corresponding policy.
 
-For example, if a subsystem could not be collected because of an environment-specific failure, the health system preserves that distinction.
+An unassessable observation cannot be evaluated reliably with the information available.
 
-This prevents:
+For example, a missing measurement or failed collection may prevent a policy from being evaluated.
 
-```text
-collection failed
-        =
-host is unhealthy
-```
+The distinction prevents the system from treating every observation failure as proof that the host is unhealthy.
 
-from becoming an automatic assumption.
+An unassessable assessment does not receive an ordinary health status. Its availability communicates that the evaluation could not be completed.
 
----
-
-## Health Status
+### Health status
 
 Assessable observations can have one of three statuses:
 
@@ -441,232 +585,98 @@ degraded
 critical
 ```
 
-The aggregation order is:
+The severity ordering is:
 
 ```text
-critical
-   ^
-degraded
-   ^
-ok
+ok < degraded < critical
 ```
 
-Critical assessments dominate degraded assessments.
-
-Degraded assessments dominate OK assessments.
+Critical assessments take precedence over degraded assessments, and degraded assessments take precedence over OK assessments when determining severity.
 
 Unassessable assessments do not automatically become critical.
 
+### Coverage
+
+The host-level result reports how much of the supplied assessment set could be evaluated.
+
+The coverage values are:
+
+| Coverage      | Meaning                                                                   |
+| ------------- | ------------------------------------------------------------------------- |
+| `complete`    | All supplied assessments were assessable.                                 |
+| `partial`     | At least one assessment was assessable and at least one was unassessable. |
+| `unavailable` | No supplied assessment was assessable.                                    |
+
+Coverage and status answer different questions.
+
+Status describes the evaluated health conditions. Coverage describes how much of the assessment set could be evaluated.
+
+For example, a critical result with partial coverage indicates that at least one evaluated condition is critical while another condition could not be assessed.
+
+That is materially different from a critical result with complete coverage.
+
+### Assessment evidence
+
+A status alone is insufficient for an explainable health system.
+
+Consider the difference between:
+
+```text
+status: degraded
+```
+
+and:
+
+```text
+status: degraded
+reason: available memory capacity is below the configured degraded threshold
+evidence: available_percent=15.25
+```
+
+The second form provides an explanation and a measurement supporting the decision.
+
+hostcheck preserves reasons and evidence so the operator can understand what the policy evaluated.
+
 ---
 
-## Coverage
+## Memory Health
 
-The host-level result also reports coverage.
-
-Coverage can be:
-
-```text
-complete
-partial
-unavailable
-```
-
-### Complete
-
-All supplied assessments were assessable.
-
-### Partial
-
-At least one assessment was assessable and at least one was unavailable.
-
-### Unavailable
-
-No supplied assessment was assessable.
-
-This distinction is important because:
-
-```text
-critical + unavailable
-```
-
-is different from:
-
-```text
-critical + complete
-```
-
-A host can have a real critical condition while other parts of the host could not be evaluated.
-
----
-
-# Memory Health
-
-Memory health uses Linux's `MemAvailable` value rather than `MemFree`.
+Memory health evaluates available memory capacity using Linux's `MemAvailable` value rather than `MemFree`.
 
 The derived observation is:
 
 ```text
-available_percent =
-    MemAvailable / MemTotal * 100
+available_percent = MemAvailable / MemTotal * 100
 ```
 
-The current default application policy is:
+`MemAvailable` estimates memory that can be made available to applications without requiring the system to begin swapping. It accounts for more than immediately unused physical memory.
+
+`MemFree` reports a different quantity and should not be substituted for available memory when evaluating the same policy.
+
+The default application thresholds are:
 
 ```text
 degraded: below 20%
 critical: below 10%
 ```
 
-The policy evaluates available memory capacity.
+These are explicit application defaults rather than universal Linux health thresholds.
 
-It does not claim to detect:
+The health policy evaluates available memory capacity at the time of observation.
 
-* historical memory pressure
-* reclaim trends
-* future out-of-memory conditions
-* swap trends
-* memory pressure duration
+It does not establish:
 
-Those require additional observations or time-series information.
+* Historical memory pressure.
+* Memory pressure duration.
+* Future out-of-memory conditions.
+* Memory reclaim trends.
+* Long-term swap behavior.
 
----
+Those questions require additional measurements, repeated observations, or time-series information.
 
-# Filesystem Health
+### Memory collection
 
-Filesystem health currently evaluates:
-
-* available filesystem capacity
-* available filesystem inodes
-
-The policies use explicit percentage thresholds.
-
-The application default is:
-
-```text
-degraded: below 20%
-critical: below 10%
-```
-
-Capacity and inode exhaustion are evaluated separately because a filesystem can have:
-
-```text
-plenty of free bytes
-```
-
-while simultaneously having:
-
-```text
-very few free inodes
-```
-
-These are different resource constraints.
-
----
-
-# Process Health
-
-The process subsystem supports process-state health assessment.
-
-The current model can evaluate observed process states such as uninterruptible sleep.
-
-The assessment is intentionally limited to what one collection can establish.
-
-For example, observing a process in `D` state means the process was observed in that state during collection.
-
-It does not prove:
-
-* how long the process has been there
-* whether the condition is persistent
-* whether the process is permanently blocked
-
-Those claims require repeated observations.
-
-Process-state policies are therefore optional and are not enabled by the default CLI policy.
-
----
-
-# Network Health
-
-The network health layer currently supports explicit policies for:
-
-* expected interfaces
-* interface operational state
-* optional carrier requirements
-* expected routes
-* route interface selection
-* route attributes
-* multipath route expectations
-
-Network health is deliberately about **local network configuration and observed interface state**.
-
-It does not currently claim to establish:
-
-* gateway reachability
-* DNS availability
-* Internet access
-* remote service reachability
-* application-layer connectivity
-
-Those would require an explicit active probe model.
-
-No active network reachability probes are currently part of V1.
-
----
-
-# CPU
-
-CPU accounting is collected from:
-
-```text
-/proc/stat
-```
-
-The aggregate CPU record has the form:
-
-```text
-cpu user nice system idle iowait irq softirq steal guest guest_nice
-```
-
-Linux reports these values as cumulative CPU time counters measured in clock ticks.
-
-hostcheck preserves the raw counters and derives utilization from changes between observations.
-
-The current model distinguishes:
-
-* user time
-* nice time
-* system time
-* idle time
-* I/O wait
-* hardware interrupt time
-* software interrupt time
-* steal time
-* guest time
-* guest-nice time
-
-Guest time is retained as raw information but is not independently added to the total because Linux already accounts for guest time within other CPU counters.
-
-CPU utilization is calculated from counter deltas:
-
-```text
-delta_total = total_after - total_before
-
-delta_busy = busy_after - busy_before
-
-utilization = delta_busy / delta_total
-```
-
-The implementation detects counter regression.
-
-A cumulative CPU counter moving backwards is treated as invalid input rather than silently producing an incorrect utilization value.
-
-CPU health remains separate from single-snapshot evaluation because utilization is inherently a multi-sample observation.
-
----
-
-# Memory Collection
-
-Memory statistics are collected from:
+System memory statistics are collected from:
 
 ```text
 /proc/meminfo
@@ -682,311 +692,394 @@ The current model includes:
 * `SwapTotal`
 * `SwapFree`
 
-The parser validates:
+The parser validates required fields, numeric values, units, duplicate fields, and missing fields.
 
-* required fields
-* numeric values
-* units
-* duplicate fields
-* missing fields
+The reader-based parsing boundary separates filesystem access from parsing, making the parser easier to test with controlled input.
 
-The production collector reads:
+Values are retained in the units reported by Linux. The memory model and derived calculations must preserve those units consistently.
 
-```text
-/proc/meminfo
-```
-
-The reader-based implementation provides a deterministic boundary between filesystem access and parsing.
-
-Values are retained using the unit reported by Linux.
-
-Detailed memory semantics are documented in:
+Memory accounting details are documented in:
 
 ```text
 docs/memory-accounting.md
 ```
 
-A controlled 512 MiB memory-pressure experiment was also performed to understand how available memory, free memory, cache, and swap changed under workload.
+The project has also used a controlled 512 MiB memory-pressure experiment to investigate changes in available memory, free memory, cache, and swap under workload.
 
 ---
 
-# Filesystem Collection
+## Filesystem Health
+
+Filesystem health evaluates two distinct resource constraints:
+
+* Available filesystem capacity.
+* Available filesystem inodes.
+
+Both use explicit percentage thresholds.
+
+The default application policy is:
+
+```text
+degraded: below 20%
+critical: below 10%
+```
+
+Capacity and inode availability are evaluated separately because a filesystem can have substantial free space in bytes while running out of inodes.
+
+These conditions affect different operations and should not be represented by one combined measurement.
+
+### Filesystem collection
 
 Filesystem statistics are collected using Linux `statfs`.
 
 The current model records:
 
-* filesystem path
-* block size
-* total blocks
-* free blocks
-* blocks available to an unprivileged process
-* total inodes
-* free inodes
+* Filesystem path.
+* Block size.
+* Total blocks.
+* Free blocks.
+* Blocks available to an unprivileged process.
+* Total inodes.
+* Free inodes.
 
 Derived values include:
 
-* used blocks
-* used bytes
-* available bytes
-* available capacity percentage
-* used inodes
-* available inode percentage
+* Used blocks.
+* Used bytes.
+* Available bytes.
+* Available capacity percentage.
+* Used inodes.
+* Available inode percentage.
 
-The implementation deliberately preserves the distinction between:
+The implementation preserves the distinction between free blocks and blocks available to an unprivileged process. Linux exposes both because filesystem capacity and user-available capacity are not always identical.
 
-```text
-free blocks
-```
+Derived arithmetic is separated from raw collection. The implementation checks relevant arithmetic assumptions and overflow conditions before returning derived values.
 
-and:
-
-```text
-blocks available to an unprivileged process
-```
-
-These represent different Linux filesystem semantics.
-
-Derived arithmetic is kept separate from raw collection.
-
-The implementation checks arithmetic assumptions and overflow conditions before returning derived values.
-
-Detailed filesystem semantics are documented in:
+Filesystem accounting details are documented in:
 
 ```text
 docs/filesystem-capacity.md
 ```
 
+### Filesystem health boundaries
+
+Filesystem health evaluates the measurements supplied to its policies.
+
+It does not automatically establish:
+
+* Whether an application can write to every directory.
+* Whether a particular user's quota has been reached.
+* Whether a mount will remain available.
+* Whether filesystem I/O latency is acceptable.
+* Whether filesystem corruption is present.
+
+Those conditions require additional observations and explicit policies.
+
 ---
 
-# Process Collection
+## Process Health
 
-Process observations are collected from the live `/proc` filesystem.
+The process subsystem collects observations from the live `/proc` filesystem.
 
-The general flow is:
+The general collection flow is:
 
 ```text
 /proc
   |
   v
-enumerate PIDs
+Enumerate PIDs
   |
   v
-read /proc/<pid>/stat
+Read /proc/<pid>/stat
   |
   v
-read /proc/<pid>/status
+Read /proc/<pid>/status
   |
   v
-Process
+Construct Process
 ```
 
-The process subsystem currently supports:
+The subsystem supports:
 
-* process enumeration
-* `/proc/<pid>/stat` parsing
-* process lifecycle race handling
-* process CPU accounting
-* process CPU utilization
-* process memory accounting
-* kernel-thread identification
-* process-state information
+* Process enumeration.
+* `/proc/<pid>/stat` parsing.
+* Process lifecycle race handling.
+* Process CPU accounting.
+* Process CPU utilization.
+* Process memory accounting.
+* Kernel-thread identification.
+* Process-state observations.
 
-A process can disappear between enumeration and individual `/proc` reads.
+### Process lifecycle races
 
-This is normal behavior for a live Linux system.
+A process can exit between PID enumeration and an individual `/proc` read. This is normal behavior on a live Linux system.
 
-hostcheck treats that lifecycle race as an expected property of `/proc` and skips processes that disappear during collection rather than failing the entire collection.
+hostcheck accounts for this lifecycle race rather than assuming every enumerated PID will remain available throughout collection.
 
-Kernel threads are included in process collection.
+Processes that disappear during collection are handled as expected lifecycle events, where appropriate, instead of causing the entire collection to fail.
 
-Their `Kthread` field is set to `true`.
+### Process CPU accounting
 
-Userspace memory information is unavailable for kernel threads because they do not expose the same userspace memory accounting through `/proc/<pid>/status`.
+Process CPU accounting uses cumulative CPU-time values exposed through `/proc/<pid>/stat`.
 
-Detailed process memory semantics are documented in:
+Process CPU utilization requires multiple observations. A single cumulative counter establishes the amount of CPU time accounted to a process, not its utilization over an interval.
+
+### Process memory accounting
+
+The process model preserves information needed for process memory analysis, including virtual size and resident-set accounting.
+
+Kernel threads are included in process collection and identified explicitly. Userspace memory information is not necessarily available for kernel threads in the same way it is for ordinary userspace processes.
+
+Process memory details are documented in:
 
 ```text
 docs/process-memory-accounting.md
 ```
 
-Controlled experiments are used to investigate process CPU and memory behavior under known workloads.
+Controlled experiments investigate process memory behavior under known workloads.
+
+### Process-state policies
+
+The health layer can evaluate selected process-state conditions.
+
+For example, a process observed in Linux state `D` was in uninterruptible sleep when it was observed.
+
+One observation does not establish how long the process has been in that state, whether the condition is persistent, or whether the process is permanently blocked.
+
+Process-state health is therefore limited to the evidence available from the observation. Process-state policies are supported but are not enabled by the default CLI policy.
 
 ---
 
-# Network Collection
+## Network Health
 
-Network state is collected from Linux network interfaces and kernel routing information.
+The network subsystem collects Linux interface information and kernel routing information.
 
 The current network snapshot includes:
 
-* interface identity
-* interface index
-* interface name
-* hardware address
-* operational state
-* carrier state
-* MTU
-* optional link speed
-* optional duplex information
-* interface addresses
-* routes
-* multipath route next hops
+* Interface index.
+* Interface name.
+* Hardware address.
+* Operational state.
+* Carrier state.
+* MTU.
+* Optional link speed.
+* Optional duplex information.
+* Interface addresses.
+* Routes.
+* Multipath route next hops.
 
-The network snapshot also records:
+Network health supports explicit policies for:
 
-```go
-ObservedAt time.Time
-```
+* Expected interfaces.
+* Interface operational state.
+* Optional carrier requirements.
+* Expected routes.
+* Route interface selection.
+* Route attributes.
+* Multipath route expectations.
 
-This identifies the observation boundary for the network collection.
+These policies evaluate local network configuration and observed interface state.
 
-It does not imply that every network field was observed at exactly the same instant.
+They do not establish gateway reachability, DNS availability, Internet connectivity, remote service reachability, or application-layer connectivity.
 
-Network state can change while collection is taking place.
+Those are separate questions that require an explicit active-probe model.
 
----
-
-## Network Addresses
+### Network addresses
 
 Interface addresses are collected through Linux networking interfaces and rtnetlink.
 
-An address retains:
+An address retains its IP address and prefix length, together with Linux address-scope information where provided by the collector.
 
-```go
-type Address struct {
-    IP        net.IP
-    PrefixLen int
-}
-```
+The implementation does not infer Linux address scope from Go's generic IP classification. Linux networking semantics should come from Linux networking data.
 
-The model intentionally avoids inferring Linux address scope from Go's generic IP classification.
+The collector also avoids treating parsed human-readable `ip` command output as its primary data source.
 
-Linux networking semantics should come from Linux networking data.
-
-The implementation also avoids parsing human-readable `ip` command output as its primary collection mechanism.
-
-Detailed address behavior is documented in:
+Address behavior is documented in:
 
 ```text
 docs/network-addresses.md
 ```
 
----
-
-## Network Routes
+### Network routes
 
 Routes are collected through rtnetlink.
 
-The route model retains kernel-level attributes including:
+The route model preserves kernel-level attributes, including:
 
-* address family
-* destination
-* destination prefix length
-* source
-* source prefix length
-* gateway
-* output interface index
-* priority
-* routing table
-* protocol
-* scope
-* route type
-* route flags
-* multipath next hops
+* Address family.
+* Destination and destination prefix length.
+* Source and source prefix length.
+* Gateway.
+* Output interface index.
+* Priority.
+* Routing table.
+* Protocol.
+* Scope.
+* Route type.
+* Route flags.
+* Multipath next hops.
 
-The project intentionally avoids reducing Linux routing to a simplistic:
+Linux routing cannot always be reduced to a single default gateway. Systems may use multiple routing tables, different route priorities, source-based routing, multiple protocols, and multipath routes.
 
-```text
-default gateway
-```
+Preserving those attributes gives higher layers access to the underlying routing structure instead of flattening it into an oversimplified model.
 
-model.
-
-Linux routing can contain multiple routing tables, protocols, priorities, source prefixes, route types, and multipath next hops.
-
-Detailed routing semantics are documented in:
+Routing behavior is documented in:
 
 ```text
 docs/network-routing.md
 ```
 
----
-
-## Multipath Routes
+### Multipath routes
 
 Linux routes can contain multiple next hops.
 
-hostcheck preserves those next hops explicitly.
+hostcheck preserves multipath information explicitly, including the interface index, gateway, hop information, and flags associated with each next hop.
 
-The model includes information such as:
+This avoids losing routing information by representing a multipath route as if it had only one gateway or interface.
 
-```go
-type NextHop struct {
-    InterfaceIndex uint32
-    Gateway        net.IP
-    Hops           uint8
-    Flags          uint8
-}
+### Network reachability boundary
+
+The current network health model can evaluate conditions such as:
+
+```text
+Expected interface exists
+Expected interface is operational
+Expected route exists
+Expected route uses the expected interface
 ```
 
-This preserves the structure of multipath routing instead of flattening the route into a single gateway or interface.
+These observations do not prove:
+
+```text
+Gateway is reachable
+DNS is working
+Internet is reachable
+Remote API is reachable
+Application is healthy
+```
+
+An active reachability subsystem would need defined destinations, protocols, timeouts, retries, failure classifications, and network-namespace behavior.
+
+Active network reachability probes are outside the current V1 scope.
 
 ---
 
-# Linux Interfaces
+## CPU Accounting and Utilization
 
-hostcheck currently works directly with several Linux operating-system interfaces:
+CPU accounting is collected from:
 
 ```text
 /proc/stat
-    CPU accounting
-
-/proc/meminfo
-    System memory accounting
-
-statfs
-    Filesystem capacity and inode accounting
-
-/proc/<pid>/
-    Process statistics and memory accounting
-
-rtnetlink
-    Network addresses and routes
-
-network interface metadata
-    Interface identity and link information
 ```
 
-The project deliberately keeps these interfaces visible in the implementation.
+The aggregate Linux CPU record contains counters for:
 
-Abstractions are introduced where they improve:
+```text
+user nice system idle iowait irq softirq steal guest guest_nice
+```
 
-* testability
-* separation of concerns
-* portability within the Linux model
-* integration boundaries
+These values represent cumulative CPU time accounted by Linux in clock ticks.
 
-They are not introduced merely to hide Linux behavior.
+hostcheck preserves the raw counters and derives utilization from changes between observations.
+
+The model distinguishes:
+
+* User time.
+* Nice time.
+* System time.
+* Idle time.
+* I/O wait.
+* Hardware interrupt time.
+* Software interrupt time.
+* Steal time.
+* Guest time.
+* Guest-nice time.
+
+Guest time is retained as raw information. It is not independently added to the total because Linux already accounts for guest time within other CPU counters.
+
+### CPU utilization
+
+CPU utilization is derived from counter deltas:
+
+```text
+delta_total = total_after - total_before
+
+delta_busy = busy_after - busy_before
+
+utilization = delta_busy / delta_total
+```
+
+The implementation must use consistent accounting semantics when calculating total and busy time.
+
+It also detects counter regression. If a cumulative counter moves backwards, the derived calculation treats the input as invalid rather than silently producing an incorrect utilization value.
+
+### Sampling boundary
+
+CPU utilization requires at least two observations separated by time.
+
+```text
+Sample 1
+   |
+   | Time passes
+   v
+Sample 2
+   |
+   v
+Counter deltas
+   |
+   v
+CPU utilization
+```
+
+A one-shot snapshot can collect CPU counters, but it cannot derive meaningful interval utilization from a single sample.
+
+For that reason, CPU utilization remains separate from the current single-snapshot health evaluation path.
+
+A future sampling or continuous-evaluation layer can build on this model without changing the meaning of the underlying CPU observations.
 
 ---
 
-# Experiments
+## Linux Collection Interfaces
+
+hostcheck works directly with Linux operating-system interfaces.
+
+| Interface                  | Purpose                                                              |
+| -------------------------- | -------------------------------------------------------------------- |
+| `/proc/stat`               | Aggregate CPU accounting                                             |
+| `/proc/meminfo`            | System memory accounting                                             |
+| `/proc/<pid>/stat`         | Process statistics and CPU accounting                                |
+| `/proc/<pid>/status`       | Process state and memory-related information                         |
+| `statfs`                   | Filesystem capacity and inode accounting                             |
+| rtnetlink                  | Network addresses, routes, and related kernel networking information |
+| Network interface metadata | Interface identity and link information                              |
+
+These interfaces remain visible in the implementation.
+
+Abstractions are introduced where they improve testability, separation of concerns, or integration boundaries. They are not introduced merely to hide the behavior of Linux.
+
+The collectors are designed around operating-system interfaces rather than around the output of human-readable shell commands.
+
+During investigation, tools such as `cat`, `df`, and `ip` remain useful for comparing collector observations against the system's own diagnostic output.
+
+---
+
+## Experiments
 
 Experiments are small programs used to investigate Linux behavior before that behavior is encoded into production collectors.
 
-Current experiments include:
+Current experiment areas include:
 
 ```text
-experiments/cpu/
-experiments/filesystem/
-experiments/network-addresses/
-experiments/network-route-table/
-experiments/network-routing/
-experiments/network-rtnetlink/
-experiments/process/
-experiments/process-cpu/
-experiments/process-memory/
+experiments/
+├── cpu/
+├── filesystem/
+├── network-addresses/
+├── network-route-table/
+├── network-routing/
+├── network-rtnetlink/
+├── process/
+├── process-cpu/
+└── process-memory/
 ```
 
 Run an experiment with:
@@ -1001,9 +1094,9 @@ For example:
 go run ./experiments/cpu
 ```
 
----
+### CPU experiment
 
-## CPU Experiment
+Location:
 
 ```text
 experiments/cpu/
@@ -1011,15 +1104,15 @@ experiments/cpu/
 
 Investigates:
 
-* `/proc/stat`
-* cumulative CPU counters
-* counter deltas
-* aggregate utilization
-* sampling behavior
+* `/proc/stat`.
+* Cumulative CPU counters.
+* Counter deltas.
+* Aggregate utilization.
+* Sampling behavior.
 
----
+### Filesystem experiment
 
-## Filesystem Experiment
+Location:
 
 ```text
 experiments/filesystem/
@@ -1027,14 +1120,14 @@ experiments/filesystem/
 
 Investigates:
 
-* filesystem capacity
-* block accounting
-* inode accounting
-* Linux filesystem statistics
+* Filesystem capacity.
+* Block accounting.
+* Inode accounting.
+* Linux filesystem statistics.
 
----
+### Process experiment
 
-## Process Experiment
+Location:
 
 ```text
 experiments/process/
@@ -1042,24 +1135,24 @@ experiments/process/
 
 Investigates:
 
-* process enumeration
-* `/proc/<pid>/stat`
-* `/proc/<pid>/status`
-* process lifecycle behavior
+* Process enumeration.
+* `/proc/<pid>/stat`.
+* `/proc/<pid>/status`.
+* Process lifecycle behavior.
 
----
+### Process CPU experiment
 
-## Process CPU Experiment
+Location:
 
 ```text
 experiments/process-cpu/
 ```
 
-Investigates process CPU accounting and utilization across multiple samples.
+Investigates process CPU accounting and utilization across multiple observations.
 
----
+### Process memory experiment
 
-## Process Memory Experiment
+Location:
 
 ```text
 experiments/process-memory/
@@ -1067,9 +1160,9 @@ experiments/process-memory/
 
 Uses controlled memory mappings and workload phases to investigate how process memory measurements appear through Linux `/proc` interfaces.
 
----
+### Network address experiment
 
-## Network Address Experiment
+Location:
 
 ```text
 experiments/network-addresses/
@@ -1077,26 +1170,20 @@ experiments/network-addresses/
 
 Investigates interface addresses and their representation through Linux networking interfaces and rtnetlink.
 
----
+### Network routing experiments
 
-## Network Routing Experiments
+Locations:
 
 ```text
 experiments/network-routing/
 experiments/network-route-table/
 ```
 
-Investigate:
+Investigate routing information, route tables, route attributes, and IPv4 and IPv6 routing behavior.
 
-* routing information
-* route tables
-* route attributes
-* IPv4 routing
-* IPv6 routing
+### Network rtnetlink experiment
 
----
-
-## Network rtnetlink Experiment
+Location:
 
 ```text
 experiments/network-rtnetlink/
@@ -1104,53 +1191,79 @@ experiments/network-rtnetlink/
 
 Inspects rtnetlink information before it is represented by the production network collector.
 
-The experiments are part of the engineering process.
+### Why experiments matter
 
-They are used to establish what Linux actually reports before the project assigns meaning to those observations.
+Experiments are part of the engineering process. They establish what Linux actually reports before the production implementation assigns meaning to those observations.
+
+The workflow is:
+
+```text
+Question
+   |
+   v
+Inspect Linux behavior
+   |
+   v
+Design controlled experiment
+   |
+   v
+Record observations
+   |
+   v
+Define the model
+   |
+   v
+Implement
+   |
+   v
+Test and document
+```
+
+This approach is particularly important for CPU accounting, memory accounting, process memory, process lifecycle behavior, filesystem capacity, network routing, and rtnetlink.
 
 ---
 
-# Testing
+## Testing and Validation
 
 Testing is performed alongside implementation.
 
-The project currently tests areas including:
+The repository's tests cover areas including:
 
-* valid parsing
-* malformed input
-* invalid numeric values
-* invalid units
-* missing fields
-* duplicate fields
-* CPU counter regression
-* CPU utilization
-* filesystem arithmetic
-* filesystem overflow
-* filesystem collector behavior
-* process enumeration
-* process lifecycle races
-* process CPU calculations
-* process memory parsing
-* kernel-thread behavior
-* network interface collection
-* network address parsing
-* route parsing
-* multipath route handling
-* collector failures
-* reader failures
-* health assessment validation
-* health aggregation
-* memory health policies
-* filesystem health policies
-* inode health policies
-* process-state health
-* network-interface health
-* network-route health
-* host snapshot evaluation
-* application policy defaults
-* application exit codes
-* JSON serialization
-* unavailable JSON results
+* Valid parsing.
+* Malformed input.
+* Invalid numeric values.
+* Invalid units.
+* Missing fields.
+* Duplicate fields.
+* CPU counter regression.
+* CPU utilization calculations.
+* Filesystem arithmetic.
+* Filesystem overflow.
+* Filesystem collector behavior.
+* Process enumeration.
+* Process lifecycle races.
+* Process CPU calculations.
+* Process memory parsing.
+* Kernel-thread behavior.
+* Network interface collection.
+* Network address parsing.
+* Route parsing.
+* Multipath route handling.
+* Collector failures.
+* Reader failures.
+* Health assessment validation.
+* Health aggregation.
+* Memory health policies.
+* Filesystem health policies.
+* Inode health policies.
+* Process-state health.
+* Network-interface health.
+* Network-route health.
+* Host snapshot evaluation.
+* Application policy defaults.
+* Application exit codes.
+* JSON serialization.
+* Unavailable JSON results.
 
 Run the complete test suite:
 
@@ -1164,7 +1277,13 @@ Run static analysis:
 go vet ./...
 ```
 
-Format Go source:
+Build all packages:
+
+```bash
+go build ./...
+```
+
+Format Go source files:
 
 ```bash
 gofmt -w .
@@ -1176,9 +1295,16 @@ Check for whitespace errors:
 git diff --check
 ```
 
----
+For changes to the application boundary, also run both output modes:
 
-# Development Validation
+```bash
+go run ./cmd/hostcheck
+go run ./cmd/hostcheck --json
+```
+
+The human-readable and JSON representations should describe the same underlying health result.
+
+### Development validation sequence
 
 The normal validation sequence is:
 
@@ -1186,246 +1312,25 @@ The normal validation sequence is:
 gofmt -w .
 go test ./...
 go vet ./...
+go build ./...
 git diff --check
 git status --short --branch
 ```
 
-For application changes, also run:
-
-```bash
-go run ./cmd/hostcheck
-go run ./cmd/hostcheck --json
-```
-
-The human-readable and JSON modes should represent the same underlying health result.
+These commands provide complementary checks for formatting, correctness, static issues, build failures, whitespace errors, and repository state.
 
 ---
 
-# Running the Project
+## Repository Structure
 
-## Requirements
+The repository is organized around Linux subsystems and engineering boundaries.
 
-hostcheck currently requires:
-
-* Linux
-* Go
-* access to the Linux interfaces used by the collectors
-
-The project is developed and tested directly on Linux because several collectors depend on Linux-specific interfaces such as:
-
-```text
-/proc
-statfs
-rtnetlink
-```
-
-Check the installed Go version:
-
-```bash
-go version
-```
-
----
-
-## Clone the Repository
-
-```bash
-git clone https://github.com/noklash/hostcheck.git
-cd hostcheck
-```
-
----
-
-## Run the Complete Test Suite
-
-```bash
-go test ./...
-```
-
----
-
-## Run Static Analysis
-
-```bash
-go vet ./...
-```
-
----
-
-## Build the Repository
-
-```bash
-go build ./...
-```
-
----
-
-## Run the Host Health Agent
-
-Human-readable output:
-
-```bash
-go run ./cmd/hostcheck
-```
-
-Structured JSON:
-
-```bash
-go run ./cmd/hostcheck --json
-```
-
----
-
-## Run Experiments
-
-Examples:
-
-```bash
-go run ./experiments/cpu
-go run ./experiments/filesystem
-go run ./experiments/process
-go run ./experiments/process-cpu
-go run ./experiments/process-memory
-go run ./experiments/network-addresses
-go run ./experiments/network-routing
-```
-
----
-
-# Inspecting Linux Interfaces Directly
-
-The collectors are intentionally based on operating-system interfaces that can also be inspected from the shell.
-
-CPU:
-
-```bash
-cat /proc/stat
-```
-
-Memory:
-
-```bash
-cat /proc/meminfo
-```
-
-Process information:
-
-```bash
-cat /proc/self/stat
-cat /proc/self/status
-```
-
-Filesystem:
-
-```bash
-df -h /
-df -i /
-```
-
-Network interfaces:
-
-```bash
-ip link
-```
-
-Network addresses:
-
-```bash
-ip addr
-```
-
-IPv4 routes:
-
-```bash
-ip route
-```
-
-IPv6 routes:
-
-```bash
-ip -6 route
-```
-
-These commands are useful when investigating collector behavior because they provide a human-readable view of operating-system state.
-
-They are investigation tools.
-
-They are not the primary data source for the production collectors.
-
----
-
-# Using the Internal Packages
-
-The implementation is organized around Linux subsystems:
-
-```text
-internal/cpu
-internal/memory
-internal/filesystem
-internal/process
-internal/network
-internal/health
-internal/host
-```
-
-The architecture intentionally keeps collection separate from interpretation.
-
-For example:
-
-```text
-/proc/stat
-    |
-    v
-CPU collector
-    |
-    v
-cpu.Stat
-    |
-    v
-CPU derivation
-    |
-    v
-CPU health policy
-```
-
-Memory follows the same general separation:
-
-```text
-/proc/meminfo
-    |
-    v
-Memory collector
-    |
-    v
-memory.MemInfo
-    |
-    v
-Derived memory observation
-    |
-    v
-Memory health policy
-```
-
-The same principle applies to filesystem, process, and network information.
-
----
-
-# Repository Structure
-
-The repository is organized around Linux subsystems and engineering boundaries rather than around a large application framework.
-
-A simplified structure is:
+A simplified view of the project is:
 
 ```text
 hostcheck/
-|
 ├── cmd/
 │   └── hostcheck/
-│       ├── main.go
-│       ├── main_test.go
-│       ├── json.go
-│       └── json_test.go
-|
 ├── internal/
 │   ├── cpu/
 │   ├── filesystem/
@@ -1434,7 +1339,6 @@ hostcheck/
 │   ├── memory/
 │   ├── network/
 │   └── process/
-|
 ├── docs/
 │   ├── filesystem-capacity.md
 │   ├── health-evaluation.md
@@ -1442,7 +1346,6 @@ hostcheck/
 │   ├── network-addresses.md
 │   ├── network-routing.md
 │   └── process-memory-accounting.md
-|
 ├── experiments/
 │   ├── cpu/
 │   ├── filesystem/
@@ -1453,197 +1356,101 @@ hostcheck/
 │   ├── process/
 │   ├── process-cpu/
 │   └── process-memory/
-|
 ├── go.mod
 └── README.md
 ```
 
-The exact file layout will evolve as the project develops.
+The exact file layout may evolve as the implementation develops.
 
-The important structural boundaries are:
+The main structural boundaries are:
 
-```text
-cmd
-    application boundary
+| Directory              | Responsibility                                           |
+| ---------------------- | -------------------------------------------------------- |
+| `cmd/`                 | Application entry points and CLI behavior                |
+| `internal/cpu/`        | CPU collection and accounting                            |
+| `internal/memory/`     | System memory collection and derived memory measurements |
+| `internal/filesystem/` | Filesystem capacity and inode accounting                 |
+| `internal/process/`    | Process collection, accounting, and memory observations  |
+| `internal/network/`    | Network interfaces, addresses, and routes                |
+| `internal/host/`       | Host-level snapshot integration                          |
+| `internal/health/`     | Health policies, assessments, and aggregation            |
+| `experiments/`         | Controlled investigation of Linux behavior               |
+| `docs/`                | Subsystem documentation and engineering decisions        |
 
-internal/* collectors
-    Linux observation
+The package structure keeps collection, host integration, health evaluation, and application behavior understandable without requiring a larger application framework.
 
-internal/host
-    host-level integration
-
-internal/health
-    interpretation and reliability semantics
-
-experiments
-    Linux investigation
-
-docs
-    engineering knowledge and decisions
-```
+The implementation uses Go's `internal/` package boundary. These packages are designed for use within the repository rather than as a public Go library API for arbitrary external imports.
 
 ---
 
-# Health Evaluation Model
+## Failure Handling and Environmental Differences
 
-The health layer intentionally separates observation from policy.
+hostcheck is designed to distinguish between an unhealthy host and a host that could not be fully observed.
 
-A memory collector might report:
+A collection failure may prevent an assessment from being evaluated. The health model preserves that limitation rather than automatically assigning a critical status.
+
+This distinction matters because Linux behavior can vary with:
+
+* Kernel configuration.
+* `/proc` mount options.
+* Process visibility restrictions.
+* User permissions.
+* Network namespaces.
+* Containerization.
+* Security policies.
+* Filesystem configuration.
+* Interface availability.
+
+Most collectors can use information available to ordinary Linux users, but not every environment exposes the same information.
+
+A process can disappear during enumeration. A network namespace can expose a different interface and route set. Security restrictions can make an otherwise valid observation unavailable.
+
+The implementation should preserve these limitations explicitly rather than inventing values or presenting incomplete observations as complete.
+
+The general rule is:
 
 ```text
-MemAvailable = 4.8 GiB
-MemTotal     = 8.0 GiB
+Observation unavailable
+          |
+          v
+Preserve the limitation
+          |
+          v
+Report assessment coverage honestly
 ```
 
-The collector should not decide:
-
-```text
-4.8 GiB is healthy
-```
-
-Instead, the health layer receives an explicit policy and evaluates the derived observation against it.
-
-This makes the same observation reusable under different operational policies.
+The host health result should describe what was actually observed and evaluated.
 
 ---
 
-## Assessment
+## Documentation
 
-An assessment represents one health decision:
+Subsystem-specific documentation records the Linux behavior and design decisions behind the implementation.
 
-```go
-type Assessment struct {
-    Subject      string
-    Availability Availability
-    Status       Status
-    Reason       string
-    Evidence     []string
-}
-```
-
-The result is intentionally explainable.
-
-A status alone is insufficient.
-
-For example:
+Current documentation includes:
 
 ```text
-status: degraded
+docs/memory-accounting.md
+docs/filesystem-capacity.md
+docs/process-memory-accounting.md
+docs/network-addresses.md
+docs/network-routing.md
+docs/health-evaluation.md
 ```
 
-is less useful than:
+The documentation covers relevant accounting semantics, implementation decisions, assumptions, experiments, limitations, and health evaluation behavior.
 
-```text
-status: degraded
+The README provides the project-level view. Detailed subsystem behavior belongs in the corresponding documentation.
 
-reason:
-available memory capacity is below the configured degraded threshold
+This division keeps the main documentation useful as an architectural overview without requiring it to reproduce every implementation detail.
 
-evidence:
-available_percent=15.25
-```
-
-The application therefore preserves both the decision and the evidence behind it.
+Documentation should remain consistent with the actual implementation. When a subsystem or application behavior changes, the relevant tests and documentation should be reviewed alongside the code.
 
 ---
 
-# Snapshot Semantics
+## Engineering Approach
 
-A host snapshot is not treated as a perfect atomic representation of the machine.
-
-The host is changing while it is being observed.
-
-For example:
-
-```text
-process enumeration
-       |
-       | process exits
-       v
-process read
-```
-
-or:
-
-```text
-network interface collection
-       |
-       | route changes
-       v
-route collection
-```
-
-The implementation therefore treats collection as a best-effort observation.
-
-The snapshot timestamp represents the observation boundary.
-
-This is an important distinction from claiming that all subsystem measurements were captured at one exact instant.
-
----
-
-# Failure Handling
-
-Failure behavior is designed around the difference between:
-
-```text
-the host is unhealthy
-```
-
-and:
-
-```text
-the host could not be fully observed
-```
-
-A collection failure is therefore recorded as a collection error where appropriate.
-
-Health evaluation can then represent the corresponding assessment as:
-
-```text
-unassessable
-```
-
-rather than automatically converting the failure into:
-
-```text
-critical
-```
-
-This distinction becomes especially important on systems where:
-
-* `/proc` visibility is restricted
-* processes disappear during enumeration
-* network namespaces differ
-* security policies restrict access
-* filesystem information behaves differently
-* specific interfaces are unavailable
-
----
-
-# Permissions and Environment
-
-Most collectors can operate using information available to ordinary Linux users.
-
-However, behavior can vary depending on:
-
-* kernel configuration
-* `/proc` mount options
-* process visibility restrictions
-* user permissions
-* network namespace
-* containerization
-* security policies
-* filesystem configuration
-
-The collector should not assume that every Linux host exposes exactly the same information.
-
-Where information is unavailable, the implementation should preserve that fact rather than inventing a value.
-
----
-
-# Engineering Approach
-
-Each subsystem follows the general workflow:
+Each subsystem follows the same general engineering workflow:
 
 ```text
 Research
@@ -1670,300 +1477,182 @@ Integrate
 Commit
 ```
 
-The project deliberately avoids starting with a large monitoring framework.
+The workflow establishes the meaning of an operating-system observation before that observation becomes an assumption in production code.
 
-For each subsystem, the engineering questions are:
+For each subsystem, the important questions include:
 
 1. What does Linux actually expose?
 2. What does each field mean?
 3. Which values are cumulative counters?
 4. Which values are derived?
 5. What can change during collection?
-6. What failure modes are normal?
+6. Which failure modes are normal?
 7. Which assumptions are safe to encode?
 8. Which information should remain raw?
 9. What belongs to collection?
 10. What belongs to derivation?
 11. What belongs to health policy?
-12. What claims can the available observations actually support?
+12. What can the available observations actually establish?
 
-This keeps the implementation grounded in operating-system behavior.
+These questions keep the implementation grounded in operating-system behavior.
+
+Experiments provide evidence. Tests protect established behavior. Documentation records the reasoning. Small, logically focused commits preserve the implementation history.
+
+The repository history should show how the system was investigated, implemented, tested, and refined, rather than only presenting the final code.
 
 ---
 
-# Design Principles
+## Design Principles
 
 hostcheck favors:
 
-* Linux-native interfaces
-* small packages
-* explicit data models
-* deterministic tests
-* controlled experiments
-* clear failure handling
-* documented assumptions
-* raw observations before interpretation
-* explicit health policies
-* explainable assessments
-* small logical commits
-* readable implementation
-* deliberate abstraction
+* Linux-native interfaces.
+* Small, focused packages.
+* Explicit data models.
+* Deterministic tests.
+* Controlled experiments.
+* Clear failure handling.
+* Documented assumptions.
+* Raw observations before interpretation.
+* Explicit health policies.
+* Explainable assessments.
+* Honest coverage reporting.
+* Small logical commits.
+* Readable implementation.
+* Deliberate abstraction.
 
-hostcheck deliberately avoids:
+The project avoids:
 
-* framework-heavy architecture
-* premature distributed-system design
-* arbitrary health thresholds
-* unnecessary abstraction
-* parsing human-readable shell output as the primary data source
-* infrastructure integrations before the host model is understood
-* active network probes without a defined probe model
-* treating unavailable observations as automatic failures
+* Framework-heavy architecture.
+* Premature distributed-system design.
+* Hidden or arbitrary health thresholds.
+* Unnecessary abstraction.
+* Parsing human-readable shell output as the primary collection mechanism.
+* Infrastructure integrations before the host model is understood.
+* Active network probes without a defined probe model.
+* Treating unavailable observations as automatic failures.
+* Claiming that a single observation proves a persistent condition.
 
----
-
-# Documentation
-
-Subsystem-specific documentation is kept separately from the implementation.
-
-Current documentation includes:
-
-```text
-docs/memory-accounting.md
-docs/filesystem-capacity.md
-docs/process-memory-accounting.md
-docs/network-addresses.md
-docs/network-routing.md
-docs/health-evaluation.md
-```
-
-The documentation captures:
-
-* Linux behavior
-* accounting semantics
-* implementation decisions
-* assumptions
-* experiments
-* limitations
-* health semantics
-* architectural boundaries
-
-The README provides the project-level view.
-
-Detailed Linux behavior belongs in the subsystem documentation.
+The objective is to keep the system small enough to understand while making its behavior technically defensible.
 
 ---
 
-# Experiments as Engineering Evidence
+## Current V1 Scope
 
-Experiments are not disposable examples.
+The current V1 scope includes the following capabilities.
 
-They are part of the project's engineering process.
+### Linux observation
 
-The purpose of an experiment is to answer a question about Linux before that behavior becomes an assumption in production code.
+* CPU accounting.
+* System memory accounting.
+* Filesystem capacity and inode accounting.
+* Process enumeration and statistics.
+* Process CPU and memory accounting.
+* Process-state observations.
+* Network interface state.
+* Network addresses.
+* Network routes.
+* Multipath route representation.
 
-The general process is:
+### Derived measurements
 
-```text
-Question
-   |
-   v
-Linux behavior
-   |
-   v
-Controlled experiment
-   |
-   v
-Observation
-   |
-   v
-Model
-   |
-   v
-Implementation
-   |
-   v
-Test
-```
+* CPU utilization from counter deltas.
+* Available memory capacity percentage.
+* Filesystem capacity percentages.
+* Available inode percentage.
+* Process CPU utilization.
+* Filesystem usage calculations.
 
-This is particularly important for areas such as:
+### Host integration
 
-* CPU accounting
-* memory accounting
-* process memory
-* process lifecycle
-* filesystem capacity
-* network routing
-* rtnetlink behavior
+* Host snapshots.
+* Observation timestamps.
+* Collection error representation.
+* Integration of subsystem observations.
 
-The project prefers evidence from the operating system over assumptions inherited from generic monitoring tools.
+### Health evaluation
 
----
+* Memory capacity policies.
+* Filesystem capacity policies.
+* Inode availability policies.
+* Process-state policies.
+* Network-interface policies.
+* Network-route policies.
+* Assessment availability.
+* Health status.
+* Assessment evidence.
+* Host-level aggregation.
+* Coverage reporting.
 
-# Current Scope
+### Application
 
-The current V1 scope includes:
+* One-shot CLI execution.
+* Human-readable output.
+* Structured JSON output.
+* Process exit codes.
+* Default health policies.
 
-* Linux CPU accounting
-* CPU counter derivation
-* system memory accounting
-* derived memory capacity
-* filesystem capacity
-* filesystem inode accounting
-* process enumeration
-* process CPU accounting
-* process CPU utilization
-* process memory accounting
-* process-state observations
-* network interface state
-* network addresses
-* network routing
-* multipath route representation
-* host snapshots
-* collection error representation
-* health policies
-* health assessments
-* host-level health aggregation
-* one-shot CLI execution
-* human-readable output
-* structured JSON output
-* process exit codes
-* deterministic tests
-* controlled Linux experiments
-* subsystem documentation
+### Engineering evidence
+
+* Deterministic tests.
+* Controlled Linux experiments.
+* Subsystem documentation.
+* Explicit architectural boundaries.
+
+The current V1 focuses on the reliability of these existing layers rather than expanding into a larger monitoring platform.
 
 ---
 
-# Deliberately Out of Scope for V1
+## Deliberately Out of Scope for V1
 
-The following are not currently part of the V1 application:
+The following capabilities are not currently part of the V1 application:
 
-* daemon mode
-* continuous background monitoring
-* Prometheus exporters
-* Grafana dashboards
-* Kubernetes integration
-* Docker integration
-* cloud-provider integrations
-* remote collection
-* distributed collection
-* persistent metric storage
-* alerting infrastructure
-* automatic remediation
-* active network reachability probes
-* DNS health probes
-* Internet reachability checks
-* application-level service probes
+* Daemon mode.
+* Continuous background monitoring.
+* Prometheus exporters.
+* Grafana dashboards.
+* Kubernetes integration.
+* Docker integration.
+* Cloud-provider integrations.
+* Remote collection.
+* Distributed collection.
+* Persistent metric storage.
+* Alerting infrastructure.
+* Automatic remediation.
+* Active network reachability probes.
+* DNS health probes.
+* Internet reachability checks.
+* Application-level service probes.
 
-These may become relevant later.
+These capabilities may become useful as the project develops, but they are not prerequisites for establishing a reliable host observation and health evaluation model.
 
-They are not prerequisites for building a technically defensible host health model.
-
----
-
-# CPU Sampling Boundary
-
-CPU utilization is fundamentally different from measurements such as:
-
-```text
-MemTotal
-MemAvailable
-filesystem capacity
-inode availability
-```
-
-CPU utilization requires at least two observations.
-
-Therefore:
-
-```text
-CPU counter
-    |
-    v
-sample 1
-    |
-    | time
-    v
-sample 2
-    |
-    v
-delta
-    |
-    v
-utilization
-```
-
-The project deliberately keeps this multi-sample model separate from the single-snapshot health path.
-
-A future continuous or sampled evaluation layer can build on this without forcing the current snapshot model to pretend that a single CPU counter represents utilization.
+A future implementation should build on the existing boundaries rather than introduce infrastructure before its requirements are clear.
 
 ---
 
-# Network Reachability Boundary
-
-The current network health model evaluates local network state.
-
-For example:
-
-```text
-expected interface exists
-expected interface is operational
-expected route exists
-expected route uses expected interface
-```
-
-These observations do not prove:
-
-```text
-gateway reachable
-DNS working
-Internet reachable
-remote API reachable
-application healthy
-```
-
-Those are different questions.
-
-A future active probe subsystem would need explicit semantics around:
-
-* destination
-* protocol
-* timeout
-* retry behavior
-* network namespace
-* failure classification
-* probe scheduling
-* permission requirements
-
-Until that model exists, hostcheck does not pretend that local routing information is equivalent to connectivity.
-
----
-
-# Configuration
+## Configuration
 
 The application currently uses explicit built-in default policies for the basic V1 health checks.
 
 It does not yet introduce a large configuration system.
 
-This is intentional.
+Configuration becomes useful when there is a concrete operational need to customize:
 
-Configuration becomes useful when there is a clear operational need to customize:
+* Resource thresholds.
+* Expected interfaces.
+* Expected routes.
+* Process-state policies.
+* Output behavior.
 
-* thresholds
-* expected interfaces
-* expected routes
-* process-state policies
-* output behavior
+The configuration model should follow those requirements rather than being introduced simply because other monitoring tools have configuration files.
 
-The project should not introduce configuration architecture merely because production monitoring tools commonly have one.
-
-The current application boundary is deliberately small.
+The current application boundary remains deliberately small.
 
 ---
 
-# Recommended First Run
+## Recommended First Run
 
-For someone working with the repository for the first time:
+For someone exploring the repository for the first time:
 
 ```bash
 git clone https://github.com/noklash/hostcheck.git
@@ -1989,7 +1678,7 @@ go run ./experiments/network-addresses
 go run ./experiments/network-routing
 ```
 
-Then inspect the subsystem documentation:
+Read the subsystem documentation:
 
 ```text
 docs/memory-accounting.md
@@ -2000,45 +1689,48 @@ docs/network-routing.md
 docs/health-evaluation.md
 ```
 
-The recommended workflow is:
+A useful exploration sequence is:
 
 ```text
 Understand the Linux interface
-          |
-          v
+             |
+             v
 Run the experiment
-          |
-          v
+             |
+             v
 Inspect the collector
-          |
-          v
+             |
+             v
 Read the tests
-          |
-          v
+             |
+             v
 Read the documentation
-          |
-          v
+             |
+             v
 Understand the health policy
-          |
-          v
+             |
+             v
 Run the application
 ```
 
+This sequence connects operating-system behavior to the implementation and then to the resulting health assessment.
+
 ---
 
-# Development Workflow
+## Development Workflow
 
-Before committing changes:
+Before committing changes, run:
 
 ```bash
 gofmt -w .
 go test ./...
 go vet ./...
+go build ./...
 git diff --check
 git status --short --branch
 ```
 
-For changes involving the application boundary:
+For changes involving the application boundary, also run:
 
 ```bash
 go run ./cmd/hostcheck
@@ -2047,7 +1739,7 @@ go run ./cmd/hostcheck --json
 
 Commits should represent one logical engineering change.
 
-Examples:
+Examples include:
 
 ```text
 network: collect addresses and routes via rtnetlink
@@ -2055,18 +1747,55 @@ memory: derive available capacity
 health: aggregate host assessments
 cmd: add host health check entrypoint
 cmd: add JSON output
+cli: improve host health report output
 docs: reconcile README with V1
 ```
 
 The repository history is intended to show how the system was investigated and built, not merely what the final code looks like.
 
+Validation results should be recorded accurately. A successful test run establishes that the tested code passed that run; it does not establish that every possible Linux environment has been tested.
+
 ---
 
-# Project Direction
+## V1 Completion Criteria
 
-hostcheck is being developed as a systems engineering project rather than as a generic monitoring application.
+The first usable V1 should be judged by engineering behavior and clarity rather than by the number of features.
 
-The direction is to move upward through the stack:
+The core criteria are:
+
+* Linux observations are collected correctly.
+* Derived values have explicit semantics.
+* Collection failures are represented honestly.
+* Health policies are explicit.
+* Assessments explain their decisions.
+* Aggregation preserves coverage information.
+* The application can perform a one-shot evaluation.
+* Human-readable output is useful to an operator.
+* JSON output is usable by another program.
+* Exit codes communicate the host-level result.
+* Tests cover important failure modes.
+* Documentation reflects the actual implementation.
+* The architecture remains understandable without a larger framework.
+
+A V1 review should also verify that:
+
+* Both output modes handle the same underlying health result.
+* Unassessable conditions are represented honestly.
+* The collection and evaluation boundaries remain separate.
+* CPU utilization is not presented as a single-snapshot measurement.
+* Network configuration is not presented as proof of end-to-end connectivity.
+* The full test suite passes.
+* Static analysis passes.
+* The repository builds successfully.
+* The working tree and Git history are understood before a release or handoff.
+
+The goal is a small host health system whose behavior can be explained from the Linux interfaces upward.
+
+---
+
+## Project Direction
+
+hostcheck is being developed as a systems engineering project. The direction is to move upward through the stack only after each underlying layer is understood.
 
 ```text
 Linux interfaces
@@ -2096,163 +1825,55 @@ Application output
 Operational integration
 ```
 
-Each layer should be understandable before the next layer is added.
-
 The current V1 application boundary is intentionally small:
 
 ```text
-collect
-   |
-   v
-snapshot
-   |
-   v
-evaluate
-   |
-   v
-aggregate
-   |
-   v
-report
+Collect
+  |
+  v
+Snapshot
+  |
+  v
+Evaluate
+  |
+  v
+Aggregate
+  |
+  v
+Report
 ```
 
-The next work should strengthen the existing boundaries rather than immediately expanding the system into a daemon, exporter, distributed agent, or orchestration platform.
+The next stage of development should strengthen the existing boundaries, verify the documentation against the implementation, and close any remaining V1 gaps before adding a daemon, exporter, distributed agent, or orchestration platform.
+
+The long-term value of the project lies in understanding the operating system, preserving its semantics, and building reliable software around that understanding.
 
 ---
 
-# V1 Completion Criteria
+## Philosophy
 
-The first usable V1 should be judged by engineering behavior rather than by the number of features.
+hostcheck is intended to make Linux behavior understandable first, then encode that understanding into a reliable tool.
 
-The core criteria are:
-
-* Linux observations are collected correctly.
-* Derived values have explicit semantics.
-* Collection failures are represented honestly.
-* Health policies are explicit.
-* Assessments are explainable.
-* Aggregation preserves coverage information.
-* The application can perform a complete one-shot evaluation.
-* Human-readable output is useful to an operator.
-* JSON output is usable by another program.
-* Exit codes communicate the host-level result.
-* Tests cover important failure modes.
-* Documentation reflects the actual implementation.
-* The repository remains understandable without requiring a larger framework.
-
-The goal is not to produce the largest monitoring agent.
-
-The goal is to produce a small host health system whose behavior can be explained from the Linux interfaces upward.
-
----
-
-# Final Architecture
-
-The current project can be understood as:
+The project moves from:
 
 ```text
-                         Linux
-                          |
-          +---------------+---------------+
-          |               |               |
-        /proc           statfs        rtnetlink
-          |               |               |
-          v               v               v
-       CPU /          Filesystem       Network
-      Memory /                         Interface /
-      Process                           Address /
-                                        Route
-          |               |               |
-          +---------------+---------------+
-                          |
-                          v
-                   Host Snapshot
-                          |
-                          v
-                Derived Observations
-                          |
-                          v
-                  Health Policies
-                          |
-                          v
-                    Assessments
-                          |
-                          v
-                     Aggregate
-                          |
-                          v
-                    Health Result
-                     /         \
-                    /           \
-                   v             v
-              Human CLI        JSON
-                   \             /
-                    \           /
-                     v         v
-                    Operator /
-                    Integration
+Kernel interface
+       |
+       v
+Observation
+       |
+       v
+Measurement
+       |
+       v
+Policy
+       |
+       v
+Health decision
+       |
+       v
+Operational result
 ```
 
-The architecture is intentionally boring where it should be boring.
-
-Linux observation should be explicit.
-
-Derived measurements should be testable.
-
-Health policy should be visible.
-
-Assessments should explain themselves.
-
-Aggregation should preserve uncertainty.
-
-The CLI should remain thin.
-
-Output should not determine the internal model.
-
----
-
-# Philosophy
-
-hostcheck is not intended to hide Linux behind a convenient command.
-
-It is intended to make Linux behavior understandable first, then encode that understanding carefully.
-
-The project therefore moves from:
-
-```text
-kernel interface
-```
-
-to:
-
-```text
-observation
-```
-
-to:
-
-```text
-measurement
-```
-
-to:
-
-```text
-policy
-```
-
-to:
-
-```text
-health decision
-```
-
-to:
-
-```text
-operational result
-```
-
-without skipping the layers in between.
+Each stage should be explicit, testable, and explainable.
 
 > First understand the system. Then master the tools. Finally, build the platform.
