@@ -1,6 +1,9 @@
 package host
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -13,8 +16,12 @@ func TestCollect(t *testing.T) {
 	after := time.Now()
 
 	if snapshot.ObservedAt.Before(before) || snapshot.ObservedAt.After(after) {
-		t.Fatalf("ObservedAt = %v, want timestamp between %v and %v",
-			snapshot.ObservedAt, before, after)
+		t.Fatalf(
+			"ObservedAt = %v, want timestamp between %v and %v",
+			snapshot.ObservedAt,
+			before,
+			after,
+		)
 	}
 
 	if snapshot.CPU == nil {
@@ -39,5 +46,60 @@ func TestCollect(t *testing.T) {
 
 	if len(snapshot.Errors) != 0 {
 		t.Fatalf("unexpected collection errors: %v", snapshot.Errors)
+	}
+}
+
+func TestCollectPreservesSuccessfulObservationsWhenFilesystemCollectionFails(
+	t *testing.T,
+) {
+	missingPath := filepath.Join(t.TempDir(), "missing-filesystem")
+
+	snapshot := Collect(Config{
+		FilesystemPath: missingPath,
+	})
+
+	if snapshot.CPU == nil {
+		t.Error("CPU snapshot is nil after filesystem collection failure")
+	}
+
+	if snapshot.Memory == nil {
+		t.Error("memory snapshot is nil after filesystem collection failure")
+	}
+
+	if snapshot.Processes == nil {
+		t.Error("process snapshot is nil after filesystem collection failure")
+	}
+
+	if snapshot.Network == nil {
+		t.Error("network snapshot is nil after filesystem collection failure")
+	}
+
+	if snapshot.Filesystem != nil {
+		t.Errorf(
+			"filesystem snapshot = %v, want nil after collection failure",
+			snapshot.Filesystem,
+		)
+	}
+
+	var filesystemErrorFound bool
+
+	for _, collectionError := range snapshot.Errors {
+		if collectionError.Subsystem != "filesystem" {
+			continue
+		}
+
+		filesystemErrorFound = true
+
+		if !errors.Is(collectionError.Err, os.ErrNotExist) {
+			t.Errorf(
+				"filesystem error = %v, want an error wrapping %v",
+				collectionError.Err,
+				os.ErrNotExist,
+			)
+		}
+	}
+
+	if !filesystemErrorFound {
+		t.Fatal("filesystem collection error was not recorded")
 	}
 }
