@@ -11,11 +11,11 @@ type MemoryPolicy struct {
 }
 
 func (p MemoryPolicy) Validate() error {
-	if p.DegradedBelowPercent < 0 || p.DegradedBelowPercent > 100 {
+	if math.IsNaN(p.DegradedBelowPercent) || p.DegradedBelowPercent < 0 || p.DegradedBelowPercent > 100 {
 		return fmt.Errorf("degraded threshold must be between 0 and 100")
 	}
 
-	if p.CriticalBelowPercent < 0 || p.CriticalBelowPercent > 100 {
+	if math.IsNaN(p.CriticalBelowPercent) || p.CriticalBelowPercent < 0 || p.CriticalBelowPercent > 100 {
 		return fmt.Errorf("critical threshold must be below degraded threshold")
 	}
 

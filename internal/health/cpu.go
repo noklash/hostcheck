@@ -1,6 +1,9 @@
 package health
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // CPUUtilizationPolicy defines health thresholds for aggregate CPU utilization.
 //
@@ -15,14 +18,14 @@ type CPUUtilizationPolicy struct {
 
 // Validate validates the CPU utilization health policy.
 func (p CPUUtilizationPolicy) Validate() error {
-	if p.DegradedAbovePercent < 0 || p.DegradedAbovePercent > 100 {
+	if math.IsNaN(p.DegradedAbovePercent) || p.DegradedAbovePercent < 0 || p.DegradedAbovePercent > 100 {
 		return fmt.Errorf(
 			"degraded CPU utilization threshold must be between 0 and 100: got %v",
 			p.DegradedAbovePercent,
 		)
 	}
 
-	if p.CriticalAbovePercent < 0 || p.CriticalAbovePercent > 100 {
+	if math.IsNaN(p.CriticalAbovePercent) || p.CriticalAbovePercent < 0 || p.CriticalAbovePercent > 100 {
 		return fmt.Errorf(
 			"critical CPU utilization threshold must be between 0 and 100: got %v",
 			p.CriticalAbovePercent,
@@ -51,7 +54,7 @@ func EvaluateCPUUtilization(
 		return Assessment{}, fmt.Errorf("CPU utilization policy: %w", err)
 	}
 
-	if utilization < 0 || utilization > 100 {
+	if math.IsNaN(utilization) || utilization < 0 || utilization > 100 {
 		return Assessment{}, fmt.Errorf(
 			"CPU utilization must be between 0 and 100: got %v",
 			utilization,
